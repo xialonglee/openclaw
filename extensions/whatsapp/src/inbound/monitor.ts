@@ -5,6 +5,7 @@ import type {
   proto,
   GroupMetadata,
   WAMessage,
+  WAMessageKey,
   WASocket,
 } from "baileys";
 import { recordChannelActivity } from "openclaw/plugin-sdk/channel-activity-runtime";
@@ -242,6 +243,10 @@ type MonitorWebInboxOptions = {
   disconnectRetryAbortSignal?: AbortSignal;
   /** Shared group metadata cache used only for inbound metadata fallback after fetch failures. */
   groupMetadataCache?: WhatsAppGroupMetadataCache;
+  /** Bounded in-memory message store for Baileys getMessage retry support. */
+  recentMessageKeys?: Map<string, proto.IMessage>;
+  /** Baileys-level group metadata cache passed as cachedGroupMetadata socket option. */
+  baileysGroupMetaCache?: Map<string, GroupMetadata>;
 };
 
 type AttachWebInboxToSocketOptions = Omit<
@@ -1260,6 +1265,19 @@ export async function attachWebInboxToSocket(
       return;
     }
     for (const msg of upsert.messages ?? []) {
+      // Store message content for Baileys getMessage retry support.
+      // Bounded to 500 entries per account — oldest entries evicted first.
+      if (msg.key?.id && msg.key?.remoteJid && msg.message) {
+        const storeKey = `${msg.key.remoteJid}:${msg.key.id}`;
+        options.recentMessageKeys?.set(storeKey, msg.message);
+        if (options.recentMessageKeys && options.recentMessageKeys.size > 500) {
+          const oldest = options.recentMessageKeys.keys().next();
+          if (!oldest.done) {
+            options.recentMessageKeys.delete(oldest.value);
+          }
+        }
+      }
+
       const receiveOrder = nextReceiveOrder++;
       if (
         await maybeResolveWhatsAppApprovalReaction({
@@ -1371,6 +1389,76 @@ export async function attachWebInboxToSocket(
     handleConnectionUpdate as unknown as (...args: unknown[]) => void,
   );
 
+  // Maintain Baileys group metadata cache for cachedGroupMetadata socket option.
+  // groups.upsert: store full GroupMetadata in Baileys-level cache and update
+  //                lightweight reconnect-only cache.
+  const detachGroupsUpsert = attachEmitterListener(
+    sock.ev as unknown as {
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+      off?: (event: string, listener: (...args: unknown[]) => void) => void;
+      removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
+    },
+    "groups.upsert",
+    ((groups: GroupMetadata[]) => {
+      for (const group of groups) {
+        if (group.id) {
+          options.baileysGroupMetaCache?.set(group.id, group);
+          rememberGroupMetadataCacheEntry(
+            groupMetadataCache,
+            group.id,
+            summarizeGroupMetaForReconnectCache(group),
+          );
+        }
+      }
+    }) as unknown as (...args: unknown[]) => void,
+  );
+
+  // Invalidate Baileys-level cache on partial updates — we can't safely merge
+  // partial GroupMetadata into a full cache entry.
+  const detachGroupsUpdate = attachEmitterListener(
+    sock.ev as unknown as {
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+      off?: (event: string, listener: (...args: unknown[]) => void) => void;
+      removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
+    },
+    "groups.update",
+    ((updates: Partial<GroupMetadata>[]) => {
+      for (const update of updates) {
+        if (update.id) {
+          options.baileysGroupMetaCache?.delete(update.id);
+        }
+      }
+    }) as unknown as (...args: unknown[]) => void,
+  );
+
+  // Invalidate Baileys-level cache on participant changes so Baileys fetches
+  // fresh participant list on next use.
+  const detachGroupParticipantsUpdate = attachEmitterListener(
+    sock.ev as unknown as {
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+      off?: (event: string, listener: (...args: unknown[]) => void) => void;
+      removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
+    },
+    "group-participants.update",
+    ((update: { id: string }) => {
+      options.baileysGroupMetaCache?.delete(update.id);
+    }) as unknown as (...args: unknown[]) => void,
+  );
+
+  // Baileys already persists LID mappings through signalRepository.lidMapping;
+  // logging here for observability without adding a parallel stale map.
+  const detachLidMappingUpdate = attachEmitterListener(
+    sock.ev as unknown as {
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+      off?: (event: string, listener: (...args: unknown[]) => void) => void;
+      removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
+    },
+    "lid-mapping.update",
+    ((mapping: Record<string, string>) => {
+      logWhatsAppVerbose(options.verbose, `LID mapping update: ${JSON.stringify(mapping)}`);
+    }) as unknown as (...args: unknown[]) => void,
+  );
+
   const replayTask = replayPendingDurableInboundMessages().catch((err: unknown) => {
     inboundLogger.error({ error: String(err) }, "failed replaying durable WhatsApp inbound");
     inboundConsoleLog.error(`Failed replaying durable WhatsApp inbound: ${String(err)}`);
@@ -1390,6 +1478,10 @@ export async function attachWebInboxToSocket(
             jid,
             summarizeGroupMetaForReconnectCache(meta),
           );
+          // Populate Baileys-level cache so cachedGroupMetadata isn't dead
+          // code for pre-existing groups; groups.upsert only fires on new
+          // group creation, not on initial connect.
+          options.baileysGroupMetaCache?.set(jid, meta);
         }
       }
       logWhatsAppVerbose(
@@ -1419,6 +1511,10 @@ export async function attachWebInboxToSocket(
       try {
         detachMessagesUpsert();
         detachConnectionUpdate();
+        detachGroupsUpsert();
+        detachGroupsUpdate();
+        detachGroupParticipantsUpdate();
+        detachLidMappingUpdate();
         await drainInboundBeforeSocketCloseWithTimeout();
       } catch (err) {
         logWhatsAppVerbose(options.verbose, `Inbound close drain failed: ${String(err)}`);
@@ -1442,9 +1538,22 @@ export async function attachWebInboxToSocket(
 
 export async function monitorWebInbox(options: MonitorWebInboxOptions) {
   const socketTiming = options.socketTiming ?? resolveWhatsAppSocketTiming(options.cfg);
+
+  // Bounded in-memory message store for Baileys getMessage retry support.
+  // Populated from messages.upsert in attachWebInboxToSocket.
+  const recentMessageKeys = new Map<string, proto.IMessage>();
+  // Baileys-level group metadata cache passed as cachedGroupMetadata socket
+  // option so Baileys uses it before fetching fresh group metadata.
+  const baileysGroupMetaCache = new Map<string, GroupMetadata>();
+
   const sock = await createWaSocket(false, options.verbose, {
     authDir: options.authDir,
     ...socketTiming,
+    getMessage: async (key: WAMessageKey) => {
+      if (!key.id || !key.remoteJid) return undefined;
+      return recentMessageKeys.get(`${key.remoteJid}:${key.id}`);
+    },
+    cachedGroupMetadata: async (jid: string) => baileysGroupMetaCache.get(jid),
   });
   try {
     await waitForWaConnection(sock, { timeoutMs: socketTiming.connectTimeoutMs });
@@ -1469,5 +1578,7 @@ export async function monitorWebInbox(options: MonitorWebInboxOptions) {
       : undefined,
     socketTiming,
     sock,
+    recentMessageKeys,
+    baileysGroupMetaCache,
   });
 }

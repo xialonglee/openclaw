@@ -528,6 +528,12 @@ export class WhatsAppConnectionController {
     }) => Promise<ManagedWhatsAppListener>;
     onHeartbeat?: (snapshot: WhatsAppConnectionSnapshot) => void;
     onWatchdogTimeout?: (snapshot: WhatsAppConnectionSnapshot) => void;
+    /** Baileys getMessage callback for message retry/decryption support. */
+    getMessage?: (
+      key: import("baileys").WAMessageKey,
+    ) => Promise<import("baileys").proto.IMessage | undefined>;
+    /** Baileys cachedGroupMetadata callback. */
+    cachedGroupMetadata?: (jid: string) => Promise<import("baileys").GroupMetadata | undefined>;
   }): Promise<WhatsAppLiveConnection> {
     if (this.current) {
       await this.closeCurrentConnection();
@@ -539,6 +545,8 @@ export class WhatsAppConnectionController {
       sock = await createWaSocket(false, this.verbose, {
         authDir: this.authDir,
         ...this.socketTiming,
+        ...(params.getMessage ? { getMessage: params.getMessage } : {}),
+        ...(params.cachedGroupMetadata ? { cachedGroupMetadata: params.cachedGroupMetadata } : {}),
       });
       await waitForWaConnection(sock, { timeoutMs: this.socketTiming.connectTimeoutMs });
 

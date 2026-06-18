@@ -193,6 +193,10 @@ export async function monitorWebChannel(
   >();
   const groupMemberNames = new Map<string, Map<string, string>>();
   const groupMetadataCache: WhatsAppGroupMetadataCache = new Map();
+  // Bounded in-memory message store for Baileys getMessage retry support.
+  const recentMessageKeys = new Map<string, import("baileys").proto.IMessage>();
+  // Baileys-level group metadata cache for cachedGroupMetadata socket option.
+  const baileysGroupMetaCache = new Map<string, import("baileys").GroupMetadata>();
   const echoTracker = createEchoTracker({ maxItems: 100, logVerbose });
 
   const sleep =
@@ -268,6 +272,11 @@ export async function monitorWebChannel(
       try {
         connection = await controller.openConnection({
           connectionId,
+          getMessage: async (key: import("baileys").WAMessageKey) => {
+            if (!key.id || !key.remoteJid) return undefined;
+            return recentMessageKeys.get(`${key.remoteJid}:${key.id}`);
+          },
+          cachedGroupMetadata: async (jid: string) => baileysGroupMetaCache.get(jid),
           createListener: async ({ sock, connection: connectionLocal }) => {
             const onMessage = createWebOnMessageHandler({
               cfg,
@@ -303,6 +312,8 @@ export async function monitorWebChannel(
               disconnectRetryPolicy: reconnectPolicy,
               disconnectRetryAbortSignal: controller.getDisconnectRetryAbortSignal(),
               groupMetadataCache,
+              recentMessageKeys,
+              baileysGroupMetaCache,
               onMessage: async (msg: WebInboundMessageInput) => {
                 const normalized = normalizeWebInboundMessage(msg);
                 const inboundAt = Date.now();
