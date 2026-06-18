@@ -273,7 +273,9 @@ export async function monitorWebChannel(
         connection = await controller.openConnection({
           connectionId,
           getMessage: async (key: import("baileys").WAMessageKey) => {
-            if (!key.id || !key.remoteJid) return undefined;
+            if (!key.id || !key.remoteJid) {
+              return undefined;
+            }
             return recentMessageKeys.get(`${key.remoteJid}:${key.id}`);
           },
           cachedGroupMetadata: async (jid: string) => baileysGroupMetaCache.get(jid),

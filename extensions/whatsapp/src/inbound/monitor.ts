@@ -1550,7 +1550,9 @@ export async function monitorWebInbox(options: MonitorWebInboxOptions) {
     authDir: options.authDir,
     ...socketTiming,
     getMessage: async (key: WAMessageKey) => {
-      if (!key.id || !key.remoteJid) return undefined;
+      if (!key.id || !key.remoteJid) {
+        return undefined;
+      }
       return recentMessageKeys.get(`${key.remoteJid}:${key.id}`);
     },
     cachedGroupMetadata: async (jid: string) => baileysGroupMetaCache.get(jid),
