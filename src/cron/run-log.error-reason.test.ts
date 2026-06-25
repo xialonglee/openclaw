@@ -2,14 +2,26 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { migrateLegacyCronRunLogsToSqlite } from "../commands/doctor/cron/legacy-run-log-migration.js";
 import { appendCronRunLog, readCronRunLogEntriesPage, type CronRunLogEntry } from "./run-log.js";
+
+const _runLogTempDirs: string[] = [];
+
+async function _trackRunLogTempDir(prefix: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  _runLogTempDirs.push(dir);
+  return dir;
+}
+
+afterAll(async () => {
+  await Promise.all(_runLogTempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
 
 async function writeLegacyRunLogAndMigrate(
   entries: Array<Record<string, unknown>>,
 ): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cron-run-log-"));
+  const dir = await _trackRunLogTempDir("cron-run-log-");
   const storePath = path.join(dir, "cron", "jobs.json");
   const file = path.join(dir, "cron", "runs", "job-1.jsonl");
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -43,7 +55,7 @@ describe("cron run log errorReason", () => {
   });
 
   it("validates persisted errorReason against the full failover reason set", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cron-run-log-"));
+    const dir = await _trackRunLogTempDir("cron-run-log-");
     const storePath = path.join(dir, "jobs.json");
     const reasons = [
       "auth",
@@ -104,7 +116,7 @@ describe("cron run log errorReason", () => {
   });
 
   it("uses provider context when deriving persisted run-log reasons", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cron-run-log-"));
+    const dir = await _trackRunLogTempDir("cron-run-log-");
     const storePath = path.join(dir, "jobs.json");
     await appendCronRunLog({
       storePath,
@@ -123,7 +135,7 @@ describe("cron run log errorReason", () => {
   });
 
   it("includes derived errorReason values in run-log search", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cron-run-log-"));
+    const dir = await _trackRunLogTempDir("cron-run-log-");
     const storePath = path.join(dir, "jobs.json");
     await appendCronRunLog({
       storePath,

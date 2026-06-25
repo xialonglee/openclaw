@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { readCronRunLogEntriesSync } from "../cron/run-log.js";
 import {
   executeSqliteQuerySync,
@@ -27,8 +27,12 @@ import {
 
 type StateDbTestDatabase = Pick<OpenClawStateKyselyDatabase, "diagnostic_events" | "schema_meta">;
 
+const _stateDbTempDirs: string[] = [];
+
 function createTempStateDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-state-db-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-state-db-"));
+  _stateDbTempDirs.push(dir);
+  return dir;
 }
 
 function statfsFixture(type: number): ReturnType<typeof fs.statfsSync> {
@@ -42,6 +46,12 @@ function statfsFixture(type: number): ReturnType<typeof fs.statfsSync> {
     ffree: 0,
   };
 }
+
+afterAll(() => {
+  for (const dir of _stateDbTempDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 afterEach(() => {
   closeOpenClawStateDatabaseForTest();

@@ -174,10 +174,17 @@ async function sendAgentWsRequestAndWaitFinal(
   return await finalP;
 }
 
+const _gwSessionTempDirs: string[] = [];
+
 async function useTempSessionStorePath() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
+  _gwSessionTempDirs.push(dir);
   testState.sessionStorePath = path.join(dir, "sessions.json");
 }
+
+afterAll(async () => {
+  await Promise.all(_gwSessionTempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
 
 describe("gateway server agent", () => {
   beforeEach(() => {
