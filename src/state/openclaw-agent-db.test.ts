@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { listOpenFileDescriptorsForPath } from "../infra/open-file-descriptors.test-support.js";
@@ -32,8 +32,12 @@ type RegisteredAgentDatabaseRow = {
   size_bytes: number | null;
 };
 
+const _agentDbTempDirs: string[] = [];
+
 function createTempStateDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-agent-db-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-agent-db-"));
+  _agentDbTempDirs.push(dir);
+  return dir;
 }
 
 function listRegisteredAgentDatabasesForTest(options: { env?: NodeJS.ProcessEnv } = {}) {
@@ -49,6 +53,12 @@ function listRegisteredAgentDatabasesForTest(options: { env?: NodeJS.ProcessEnv 
     sizeBytes: row.size_bytes,
   }));
 }
+
+afterAll(() => {
+  for (const dir of _agentDbTempDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 afterEach(() => {
   closeOpenClawAgentDatabasesForTest();

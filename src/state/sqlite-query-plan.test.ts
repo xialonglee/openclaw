@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
@@ -13,8 +13,12 @@ import {
   openOpenClawStateDatabase,
 } from "./openclaw-state-db.js";
 
+const _planTempDirs: string[] = [];
+
 function createTempStateDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sqlite-plan-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sqlite-plan-"));
+  _planTempDirs.push(dir);
+  return dir;
 }
 
 function explainQueryPlan(
@@ -47,6 +51,12 @@ function expectPlanIncludes(params: {
 }): void {
   expect(explainQueryPlan(params.db, params.sql, params.params)).toContain(params.expected);
 }
+
+afterAll(() => {
+  for (const dir of _planTempDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 afterEach(() => {
   closeOpenClawAgentDatabasesForTest();

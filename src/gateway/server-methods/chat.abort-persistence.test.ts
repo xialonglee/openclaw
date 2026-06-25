@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION } from "openclaw/plugin-sdk/agent-sessions";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { onAgentEvent, resetAgentEventsForTest } from "../../infra/agent-events.js";
 import {
   createActiveRun,
@@ -164,8 +164,11 @@ function setMockSessionEntry(transcriptPath: string, sessionId: string, hasEntry
   sessionEntryState.loadCalls = [];
 }
 
+const _abortTempDirs: string[] = [];
+
 async function createTranscriptFixture(prefix: string) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  _abortTempDirs.push(dir);
   const sessionId = "sess-main";
   const transcriptPath = path.join(dir, `${sessionId}.jsonl`);
   await writeTranscriptHeader(transcriptPath, sessionId);
@@ -175,11 +178,16 @@ async function createTranscriptFixture(prefix: string) {
 
 async function createMissingEntryFixture(prefix: string) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  _abortTempDirs.push(dir);
   const transcriptPath = path.join(dir, "missing.jsonl");
   const sessionId = "client-supplied-session";
   setMockSessionEntry(transcriptPath, sessionId, false);
   return { sessionId };
 }
+
+afterAll(async () => {
+  await Promise.all(_abortTempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
