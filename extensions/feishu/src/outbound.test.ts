@@ -328,6 +328,19 @@ describe("feishuOutbound.sendText local-image auto-convert", () => {
     expect(chunker("hello world", 5)).toEqual(["hello", "world"]);
   });
 
+  it("preserves single newlines in chunker text (card and comment text must not be modified)", () => {
+    const chunker = feishuOutbound.chunker;
+    if (!chunker) {
+      throw new Error("feishuOutbound.chunker missing");
+    }
+
+    const text = "line one\nline two\nline three";
+    const chunks = chunker(text, 100);
+    // All chunks joined should equal the original text with single newlines intact
+    expect(chunks.join("")).toBe(text);
+    expect(chunks.join("")).not.toContain("\n\n");
+  });
+
   async function createTmpImage(ext = ".png"): Promise<{ dir: string; file: string }> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-feishu-outbound-"));
     const file = path.join(dir, `sample${ext}`);

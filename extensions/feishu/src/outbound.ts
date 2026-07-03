@@ -475,10 +475,7 @@ async function sendFeishuFallbackPayload(params: {
 
 export const feishuOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
-  // Normalize post-md newlines before chunking so the chunker measures
-  // the expanded length. Without this, a raw chunk within the 4000-char
-  // limit can grow past it after the final payload builder normalizes.
-  chunker: (text, limit) => chunkTextForOutbound(normalizeFeishuPostMarkdownNewlines(text), limit),
+  chunker: (text, limit) => chunkTextForOutbound(text, limit),
   chunkerMode: "markdown",
   textChunkLimit: FEISHU_TEXT_CHUNK_LIMIT,
   presentationCapabilities: {
