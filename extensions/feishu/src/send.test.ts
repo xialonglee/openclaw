@@ -156,6 +156,30 @@ describe("buildFeishuPostMessagePayload", () => {
       ].join("\n"),
     );
   });
+
+  it("skips normalization when alreadyNormalized is true (pre-chunked text)", () => {
+    const payload = buildFeishuPostMessagePayload({
+      messageText: "line one\nline two\nline three",
+      alreadyNormalized: true,
+    });
+    const element = JSON.parse(payload.content).zh_cn.content[0][0];
+    expect(element.text).toBe("line one\nline two\nline three");
+  });
+
+  it("does not expand code-block newlines in already-normalized chunks split inside a fenced region", () => {
+    // Simulate a sub-chunk that starts mid-code-block — the opening fence
+    // is in a prior chunk so findCodeRegions would not detect this as code.
+    // alreadyNormalized must prevent the second pass from expanding code
+    // newlines to paragraph breaks.
+    const payload = buildFeishuPostMessagePayload({
+      messageText: "code line 1\ncode line 2\ncode line 3",
+      alreadyNormalized: true,
+    });
+    const element = JSON.parse(payload.content).zh_cn.content[0][0];
+    // Without the flag, normalizeFeishuPostMarkdownNewlines would expand
+    // these single newlines to \n\n. With the flag, they stay single.
+    expect(element.text).toBe("code line 1\ncode line 2\ncode line 3");
+  });
 });
 
 describe("normalizeFeishuPostMarkdownNewlines", () => {

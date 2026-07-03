@@ -530,6 +530,11 @@ type SendFeishuMessageParams = {
   mentions?: MentionTarget[];
   /** Account ID (optional, uses default if not specified) */
   accountId?: string;
+  /** When true, skip normalizeFeishuPostMarkdownNewlines — caller already
+   *  normalized the full text before chunking so re-normalizing risks
+   *  expanding code-block newlines when a chunk boundary falls inside a
+   *  fenced region. */
+  alreadyNormalized?: boolean;
 };
 
 type FeishuPostMessageElement =
@@ -608,16 +613,22 @@ export function normalizeFeishuPostMarkdownNewlines(text: string): string {
 export function buildFeishuPostMessagePayload(params: {
   messageText: string;
   mentions?: MentionTarget[];
+  /** When true, skip normalizeFeishuPostMarkdownNewlines — caller already
+   *  normalized the full text before chunking so re-normalizing risks
+   *  expanding code-block newlines when a chunk boundary falls inside a
+   *  fenced region. */
+  alreadyNormalized?: boolean;
 }): {
   content: string;
   msgType: string;
 } {
-  const { messageText, mentions } = params;
+  const { messageText, mentions, alreadyNormalized } = params;
+  const text = alreadyNormalized ? messageText : normalizeFeishuPostMarkdownNewlines(messageText);
   const content: FeishuPostMessageElement[] = [
     ...buildFeishuPostMentionElements(mentions),
     {
       tag: "md",
-      text: normalizeFeishuPostMarkdownNewlines(messageText),
+      text,
     },
   ];
   return {
@@ -642,6 +653,7 @@ export async function sendMessageFeishu(
     allowTopLevelReplyFallback,
     mentions,
     accountId,
+    alreadyNormalized,
   } = params;
   const { client, receiveId, receiveIdType } = resolveFeishuSendTarget({ cfg, to, accountId });
   const tableMode = resolveMarkdownTableMode({
@@ -651,7 +663,11 @@ export async function sendMessageFeishu(
 
   const messageText = convertMarkdownTables(text ?? "", tableMode);
 
-  const { content, msgType } = buildFeishuPostMessagePayload({ messageText, mentions });
+  const { content, msgType } = buildFeishuPostMessagePayload({
+    messageText,
+    mentions,
+    alreadyNormalized,
+  });
 
   const directParams = { receiveId, receiveIdType, content, msgType };
   return sendReplyOrFallbackDirect(client, {
@@ -748,6 +764,7 @@ export async function editMessageFeishu(params: {
   }
   const payload = buildFeishuPostMessagePayload({
     messageText: normalizedText,
+    alreadyNormalized: true,
   });
   const response = await client.im.message.patch({
     path: { message_id: messageId },

@@ -564,6 +564,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                 replyInThread: effectiveReplyInThread,
                 allowTopLevelReplyFallback,
                 accountId,
+                alreadyNormalized: true,
               });
             },
           });
@@ -591,6 +592,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                     replyInThread: effectiveReplyInThread,
                     allowTopLevelReplyFallback,
                     accountId,
+                    alreadyNormalized: true,
                   });
                 },
               });
@@ -753,6 +755,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                       replyInThread: effectiveReplyInThread,
                       allowTopLevelReplyFallback,
                       accountId,
+                      alreadyNormalized: true,
                       ...(isFirstBlock && isFirst && mentionTargets?.length
                         ? { mentions: mentionTargets }
                         : {}),
@@ -837,6 +840,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                   replyInThread: effectiveReplyInThread,
                   allowTopLevelReplyFallback,
                   accountId,
+                  alreadyNormalized: true,
                   ...(info?.kind === "final" && isFirst && mentionTargets?.length
                     ? { mentions: mentionTargets }
                     : {}),

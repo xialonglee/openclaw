@@ -2113,6 +2113,20 @@ describe("feishuOutbound.sendText replyToId forwarding", () => {
     expect(sendMessageCall()?.replyToMessageId).toBe("om_inline");
     expect(sendMessageCall()?.replyInThread).toBe(false);
   });
+
+  it("marks alreadyNormalized on post-md sends so chunks skip redundant normalization", async () => {
+    await sendText({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: "post-md text",
+      accountId: "main",
+    });
+
+    // Normal post-md send goes through sendOutboundText which normalizes
+    // before calling sendMessageFeishu — the flag must be set so the
+    // payload builder does not normalize again.
+    expect(sendMessageCall()?.alreadyNormalized).toBe(true);
+  });
 });
 
 describe("feishuOutbound.sendMedia replyToId forwarding", () => {

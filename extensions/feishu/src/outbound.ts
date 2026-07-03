@@ -418,6 +418,7 @@ async function sendOutboundText(params: {
       accountId,
       replyToMessageId,
       replyInThread,
+      alreadyNormalized: true,
     });
   }
 
@@ -434,6 +435,7 @@ async function sendOutboundText(params: {
       accountId,
       replyToMessageId: i === 0 ? replyToMessageId : undefined,
       replyInThread: i === 0 ? replyInThread : undefined,
+      alreadyNormalized: true,
     });
   }
   return lastResult!;
