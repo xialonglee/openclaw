@@ -1,7 +1,9 @@
-// Provider operation retry tests cover retry timing and abort behavior.
+// Provider operation retry tests cover retry timing, abort behavior,
+// and transient error classification.
 import { describe, expect, it, vi } from "vitest";
 import {
   executeProviderOperationWithRetry,
+  isTransientProviderOperationError,
   resolveTransientProviderAttempts,
 } from "./operation-retry.js";
 
@@ -41,5 +43,52 @@ describe("executeProviderOperationWithRetry", () => {
     ).rejects.toThrow("HTTP 503");
 
     expect(operation).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("isTransientProviderOperationError", () => {
+  function makeError(code: string) {
+    const error = new Error("fetch failed");
+    Object.assign(error, { cause: Object.assign(new Error("connect error"), { code }) });
+    return error;
+  }
+
+  it("classifies transient network error codes as retryable", () => {
+    const transientCodes = [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+      "EPIPE",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "ENOTFOUND",
+    ];
+    for (const code of transientCodes) {
+      expect(
+        isTransientProviderOperationError(makeError(code), "fetch failed"),
+        `${code} should be transient`,
+      ).toBe(true);
+    }
+  });
+
+  it("treats 4xx status as non-retryable", () => {
+    const error = Object.assign(new Error("Bad Request"), { status: 400 });
+    expect(isTransientProviderOperationError(error, "Bad Request")).toBe(false);
+  });
+
+  it("treats 5xx status as retryable", () => {
+    const error = Object.assign(new Error("Server Error"), { status: 503 });
+    expect(isTransientProviderOperationError(error, "Server Error")).toBe(true);
+  });
+
+  it("treats transient codes in the top-level error message as retryable", () => {
+    const error = new Error("connect ECONNRESET 127.0.0.1:443");
+    expect(isTransientProviderOperationError(error, error.message)).toBe(true);
+  });
+
+  it("treats non-transient codes as non-retryable", () => {
+    const error = new Error("ENOENT: no such file or directory");
+    expect(isTransientProviderOperationError(error, error.message)).toBe(false);
   });
 });

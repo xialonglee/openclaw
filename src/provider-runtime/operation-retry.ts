@@ -103,8 +103,12 @@ function readErrorCause(error: unknown): unknown {
   return (error as { cause?: unknown }).cause;
 }
 
+// Transient network error codes that indicate a connection-level failure
+// where a retry may succeed. When adding codes, also consider run-wait.ts
+// RECOVERABLE_AGENT_WAIT_ERROR_PATTERNS (gateway transport) for parity.
 function hasTransientNetworkSignal(error: unknown, message: string): boolean {
-  const transientCodes = /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN)\b/i;
+  const transientCodes =
+    /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|EHOSTUNREACH|ENETUNREACH|ENOTFOUND)\b/i;
   if (transientCodes.test(message)) {
     return true;
   }

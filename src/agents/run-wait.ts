@@ -133,7 +133,10 @@ const RECOVERABLE_AGENT_WAIT_ERROR_PATTERNS: readonly RegExp[] = [
   /gateway not connected/i,
   /no active .* listener/i,
   /socket hang up/i,
-  /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH)\b/i,
+  // Transient network error codes for gateway transport failures.
+  // Intentionally excludes ENOTFOUND (DNS failure) — gateway is a configured local/remote
+  // service whose hostname should always resolve. See also operation-retry.ts:hasTransientNetworkSignal.
+  /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN)\b/i,
 ];
 
 /** Return true for transient gateway/transport failures that callers may retry. */

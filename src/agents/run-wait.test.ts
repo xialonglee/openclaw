@@ -586,3 +586,41 @@ describe("waitForAgentRunsToDrain", () => {
     }
   });
 });
+
+describe("isRecoverableAgentWaitError", () => {
+  it("matches connection-level transient error codes", () => {
+    const transientCodes = [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "ETIMEDOUT",
+      "EPIPE",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "EAI_AGAIN",
+    ];
+    for (const code of transientCodes) {
+      expect(
+        isRecoverableAgentWaitError(`connect ${code} 127.0.0.1:443`),
+        `${code} should be recoverable`,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects gateway timeout as non-recoverable", () => {
+    expect(isRecoverableAgentWaitError("gateway timeout")).toBe(false);
+  });
+
+  it("rejects empty strings as non-recoverable", () => {
+    expect(isRecoverableAgentWaitError("")).toBe(false);
+    expect(isRecoverableAgentWaitError(undefined)).toBe(false);
+  });
+
+  it("rejects non-transient errors as non-recoverable", () => {
+    expect(isRecoverableAgentWaitError("ENOENT: no such file")).toBe(false);
+    expect(isRecoverableAgentWaitError("model not found")).toBe(false);
+  });
+
+  it("excludes ENOTFOUND (DNS failure) — gateway hostname should always resolve", () => {
+    expect(isRecoverableAgentWaitError("getaddrinfo ENOTFOUND gateway.example.com")).toBe(false);
+  });
+});
