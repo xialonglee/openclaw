@@ -101,7 +101,10 @@ describe("tui-event-handlers: handleAgentEvent", () => {
     const btw = createMockBtwPresenter();
     const tui = { requestRender: vi.fn() } as unknown as MockTui & HandlerTui;
     const setActivityStatus = vi.fn();
-    const loadHistory = vi.fn(async () => ({ loaded: true as const, inFlightRunId: null }));
+    const loadHistory = vi.fn<() => Promise<TuiHistoryLoadResult>>(async () => ({
+      loaded: true,
+      inFlightRunId: null,
+    }));
     const localRunIds = new Set<string>();
     const localBtwRunIds = new Set<string>();
     const noteLocalRunId = (runId: string) => {
@@ -1530,7 +1533,7 @@ describe("tui-event-handlers: handleAgentEvent", () => {
     loadHistory.mockImplementation(async () => {
       expect(state.activeChatRunId).toBeNull();
       expect(state.activityStatus).toBe("idle");
-      return true;
+      return { loaded: true, inFlightRunId: null };
     });
 
     handleChatEvent({
