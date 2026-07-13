@@ -1234,8 +1234,8 @@ export function handleMessageEnd(
           (b): b is { type: "text"; text: string } =>
             typeof b === "object" &&
             b !== null &&
-            (b as Record<string, unknown>).type === "text" &&
-            typeof (b as Record<string, unknown>).text === "string",
+            (b as unknown as Record<string, unknown>).type === "text" &&
+            typeof (b as unknown as Record<string, unknown>).text === "string",
         )
         .map((b) => b.text)
         .join("\n")
