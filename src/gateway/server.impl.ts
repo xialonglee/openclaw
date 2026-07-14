@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { getActiveBackgroundExecSessionCount } from "../agents/bash-process-registry.js";
 import {
@@ -42,10 +41,6 @@ import {
   isDiagnosticsEnabled,
   setDiagnosticsEnabledForProcess,
 } from "../infra/diagnostic-events.js";
-import {
-  emitDiagnosticsTimelineEvent,
-  isDiagnosticsTimelineEnabled,
-} from "../infra/diagnostics-timeline.js";
 import { isTruthyEnvValue, isVitestRuntimeEnv, logAcceptedEnvOption } from "../infra/env.js";
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import type { PluginApprovalRequestPayload } from "../infra/plugin-approvals.js";
@@ -58,7 +53,6 @@ import {
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { upsertPresence } from "../infra/system-presence.js";
 import type { VoiceWakeRoutingConfig } from "../infra/voicewake-routing.js";
-import { withDiagnosticPhase } from "../logging/diagnostic-phase.js";
 import { startDiagnosticHeartbeat, stopDiagnosticHeartbeat } from "../logging/diagnostic.js";
 import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
 import { setCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
@@ -112,8 +106,6 @@ import {
 import {
   collectGatewayProcessMemoryUsageMb,
   finishGatewayRestartTrace,
-  recordGatewayRestartTraceDetail,
-  recordGatewayRestartTraceSpan,
   resumeGatewayRestartTraceFromEnv,
   resumeGatewayRestartTraceFromHandoff,
 } from "./restart-trace.js";
@@ -136,7 +128,14 @@ import {
   type SharedGatewaySessionGenerationState,
 } from "./server-shared-auth-generation.js";
 import type { GatewaySidecarStartupMode } from "./server-sidecar-startup-mode.js";
+import { createGatewayStartupTrace } from "./server-startup-trace.js";
 import { createWizardSessionTracker } from "./server-wizard-sessions.js";
+import {
+  bootstrapWorkerPlacementRuntime,
+  createWorkerDispatchAuthorityRevoker,
+  createWorkerDispatchCell,
+  createWorkerPlacementStartupSidecarConfig,
+} from "./server-worker-placement.js";
 import { createGatewayEventLoopHealthMonitor } from "./server/event-loop-health.js";
 import {
   getHealthCache,
@@ -162,10 +161,6 @@ const loadGatewayModelCatalogModule = createLazyRuntimeModule(
 const loadWorkerEnvironmentStartupModule = createLazyRuntimeModule(
   () => import("./server-worker-environment-startup.js"),
 );
-const loadWorkerPlacementStartupModule = createLazyRuntimeModule(
-  () => import("./server-worker-placement-startup.js"),
-);
-
 export async function resetModelCatalogCacheForTest(): Promise<void> {
   const { resetModelCatalogCacheForTest: resetModelCatalogCacheForTestLocal } =
     await loadGatewayModelCatalogModule();
@@ -177,21 +172,6 @@ ensureOpenClawCliOnPath();
 const MAX_MEDIA_TTL_HOURS = 24 * 7;
 const POST_READY_MAINTENANCE_DELAY_MS = 250;
 const RETAINED_PLUGIN_CLEANUP_DELAY_MS = 30_000;
-
-function approvalRequestTargetsSession(
-  request: unknown,
-  sessionKeys: ReadonlySet<string>,
-  sessionId: string,
-): boolean {
-  if (typeof request !== "object" || request === null) {
-    return false;
-  }
-  const record = request as { sessionKey?: unknown; sessionId?: unknown };
-  return (
-    (typeof record.sessionId === "string" && record.sessionId === sessionId) ||
-    (typeof record.sessionKey === "string" && sessionKeys.has(record.sessionKey))
-  );
-}
 
 type GatewayStartupChannelPlugin = {
   id: ChannelId;
@@ -263,210 +243,6 @@ const logPlugins = log.child("plugins");
 const logWsControl = log.child("ws");
 const logSecrets = log.child("secrets");
 const gatewayRuntime = runtimeForLogger(log);
-
-function createGatewayStartupTrace() {
-  const logEnabled = isTruthyEnvValue(process.env.OPENCLAW_GATEWAY_STARTUP_TRACE);
-  let timelineConfig: OpenClawConfig | undefined;
-  let eventLoopDelay: ReturnType<typeof monitorEventLoopDelay> | undefined;
-  const timelineOptions = () => ({
-    ...(timelineConfig ? { config: timelineConfig } : {}),
-    env: process.env,
-  });
-  const eventLoopTimelineEnabled = () =>
-    isDiagnosticsTimelineEnabled(timelineOptions()) &&
-    isTruthyEnvValue(process.env.OPENCLAW_DIAGNOSTICS_EVENT_LOOP);
-  const ensureEventLoopDelay = () => {
-    if (eventLoopDelay || (!logEnabled && !eventLoopTimelineEnabled())) {
-      return;
-    }
-    eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
-    eventLoopDelay.enable();
-  };
-  ensureEventLoopDelay();
-  const started = performance.now();
-  let last = started;
-  let spanSequence = 0;
-  const formatMetric = (key: string, value: number | string) =>
-    `${key}=${typeof value === "number" ? value.toFixed(1) : value}`;
-  const mapTimelineName = (name: string) => {
-    switch (name) {
-      case "config.snapshot":
-        return "config.load";
-      case "config.auth":
-      case "config.final-snapshot":
-      case "runtime.config":
-        return "config.normalize";
-      case "plugins.bootstrap":
-        return "plugins.load";
-      case "runtime.post-attach":
-      case "ready":
-        return "gateway.ready";
-      default:
-        return name;
-    }
-  };
-  const takeEventLoopSample = () => {
-    if (!eventLoopDelay) {
-      return undefined;
-    }
-    const sample = {
-      p50Ms: eventLoopDelay.percentile(50) / 1_000_000,
-      p95Ms: eventLoopDelay.percentile(95) / 1_000_000,
-      p99Ms: eventLoopDelay.percentile(99) / 1_000_000,
-      maxMs: eventLoopDelay.max / 1_000_000,
-    };
-    eventLoopDelay.reset();
-    return sample;
-  };
-  const emitEventLoopTimelineSample = (
-    activeSpanName: string,
-    sample: ReturnType<typeof takeEventLoopSample>,
-  ) => {
-    if (!eventLoopTimelineEnabled()) {
-      return;
-    }
-    if (!sample) {
-      return;
-    }
-    emitDiagnosticsTimelineEvent(
-      {
-        type: "eventLoop.sample",
-        name: "eventLoop",
-        phase: "startup",
-        activeSpanName: mapTimelineName(activeSpanName),
-        attributes:
-          activeSpanName === mapTimelineName(activeSpanName)
-            ? undefined
-            : { traceName: activeSpanName },
-        ...sample,
-      },
-      timelineOptions(),
-    );
-  };
-  const emit = (
-    name: string,
-    durationMs: number,
-    totalMs: number,
-    eventLoopSample: ReturnType<typeof takeEventLoopSample>,
-    extras: ReadonlyArray<readonly [string, number | string]> = [],
-  ) => {
-    const metrics = [
-      ["eventLoopMax", `${(eventLoopSample?.maxMs ?? 0).toFixed(1)}ms`] as const,
-      ...extras,
-    ];
-    recordGatewayRestartTraceSpan(`restart.ready.${name}`, durationMs, totalMs, metrics);
-    if (logEnabled) {
-      log.info(
-        `startup trace: ${name} ${durationMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms ${metrics.map(([key, value]) => formatMetric(key, value)).join(" ")}`,
-      );
-    }
-  };
-  return {
-    setConfig(config: OpenClawConfig) {
-      timelineConfig = config;
-      ensureEventLoopDelay();
-    },
-    mark(name: string) {
-      const now = performance.now();
-      const eventLoopSample = takeEventLoopSample();
-      emit(name, now - last, now - started, eventLoopSample);
-      emitDiagnosticsTimelineEvent(
-        {
-          type: "mark",
-          name: mapTimelineName(name),
-          phase: "startup",
-          durationMs: now - started,
-          attributes: name === mapTimelineName(name) ? undefined : { traceName: name },
-        },
-        timelineOptions(),
-      );
-      emitEventLoopTimelineSample(name, eventLoopSample);
-      last = now;
-      if (name === "ready") {
-        eventLoopDelay?.disable();
-      }
-    },
-    detail(name: string, metrics: ReadonlyArray<readonly [string, number | string]>) {
-      const attributes = Object.fromEntries(metrics);
-      recordGatewayRestartTraceDetail(`restart.ready.${name}`, metrics);
-      if (logEnabled) {
-        log.info(
-          `startup trace: ${name} ${metrics.map(([key, value]) => formatMetric(key, value)).join(" ")}`,
-        );
-      }
-      emitDiagnosticsTimelineEvent(
-        {
-          type: "mark",
-          name: mapTimelineName(name),
-          phase: "startup",
-          attributes: {
-            traceName: name,
-            ...attributes,
-          },
-        },
-        timelineOptions(),
-      );
-    },
-    async measure<T>(
-      name: string,
-      run: () => Promise<T> | T,
-      options: { omitErrorMessage?: boolean } = {},
-    ): Promise<T> {
-      const before = performance.now();
-      const spanId = `gateway-startup-${++spanSequence}`;
-      emitDiagnosticsTimelineEvent(
-        {
-          type: "span.start",
-          name: mapTimelineName(name),
-          phase: "startup",
-          spanId,
-          attributes: name === mapTimelineName(name) ? undefined : { traceName: name },
-        },
-        timelineOptions(),
-      );
-      try {
-        const result = await withDiagnosticPhase(mapTimelineName(name), run, { traceName: name });
-        const now = performance.now();
-        emitDiagnosticsTimelineEvent(
-          {
-            type: "span.end",
-            name: mapTimelineName(name),
-            phase: "startup",
-            spanId,
-            durationMs: now - before,
-            attributes: name === mapTimelineName(name) ? undefined : { traceName: name },
-          },
-          timelineOptions(),
-        );
-        return result;
-      } catch (error) {
-        const now = performance.now();
-        emitDiagnosticsTimelineEvent(
-          {
-            type: "span.error",
-            name: mapTimelineName(name),
-            phase: "startup",
-            spanId,
-            durationMs: now - before,
-            attributes: name === mapTimelineName(name) ? undefined : { traceName: name },
-            errorName: error instanceof Error ? error.name : typeof error,
-            ...(options.omitErrorMessage
-              ? {}
-              : { errorMessage: error instanceof Error ? error.message : String(error) }),
-          },
-          timelineOptions(),
-        );
-        throw error;
-      } finally {
-        const now = performance.now();
-        const eventLoopSample = takeEventLoopSample();
-        emit(name, now - before, now - started, eventLoopSample);
-        emitEventLoopTimelineSample(name, eventLoopSample);
-        last = now;
-      }
-    },
-  };
-}
 
 function formatRuntimeGatewayAuthTokenWarning(): string {
   const base =
@@ -931,29 +707,16 @@ export async function startGatewayServer(
       : {};
   const { workerEnvironmentService, workerLiveEvents } = workerEnvironmentRuntime;
   // Assigned once approval managers exist; placement dispatch must not run before then.
-  let revokeWorkerDispatchSessionAuthority = (_params: {
-    sessionId: string;
-    sessionKeys: readonly string[];
-  }): void => {
-    throw new Error("Worker dispatch authority revocation is not ready");
-  };
-  const workerPlacementRuntime =
-    workerEnvironmentService && workerEnvironmentStartup
-      ? await startupTrace.measure("worker-environments.placement-runtime", async () => {
-          const placementModule = await loadWorkerPlacementStartupModule();
-          return placementModule.createGatewayWorkerPlacementRuntime({
-            placements: workerEnvironmentStartup.placementStore,
-            environments: workerEnvironmentService,
-            admitNewPlacements: hasConfiguredWorkerProfiles,
-            revokeSessionAuthority: (request) => revokeWorkerDispatchSessionAuthority(request),
-            warn: (message) => log.warn(message),
-          });
-        })
-      : undefined;
-  // Without configured profiles, existing placements still reconcile but new dispatches stay off.
-  const workerPlacementDispatchAvailable = hasConfiguredWorkerProfiles
-    ? workerPlacementRuntime?.dispatchService
-    : undefined;
+  const workerDispatchCell = createWorkerDispatchCell();
+  const { workerPlacementRuntime, workerPlacementDispatchAvailable } =
+    await bootstrapWorkerPlacementRuntime({
+      workerEnvironmentService,
+      workerEnvironmentStartup,
+      startupTrace,
+      hasConfiguredWorkerProfiles,
+      log,
+      revokeCell: workerDispatchCell,
+    });
   const channelLogs = Object.fromEntries(
     listGatewayStartupChannelPlugins().map((plugin) => [plugin.id, logChannels.child(plugin.id)]),
   ) as Record<ChannelId, ReturnType<typeof createSubsystemLogger>>;
@@ -1587,22 +1350,11 @@ export async function startGatewayServer(
     });
     approvalManagersForReplay.exec = execApprovalManager;
     approvalManagersForReplay.plugin = pluginApprovalManager;
-    revokeWorkerDispatchSessionAuthority = ({ sessionId, sessionKeys }) => {
-      const keys = new Set(sessionKeys);
-      for (const sessionKey of keys) {
-        revokeAttachGrantsForSession(sessionKey);
-      }
-      for (const record of execApprovalManager.listPendingRecords()) {
-        if (approvalRequestTargetsSession(record.request, keys, sessionId)) {
-          execApprovalManager.expire(record.id, "worker-dispatch");
-        }
-      }
-      for (const record of pluginApprovalManager.listPendingRecords()) {
-        if (approvalRequestTargetsSession(record.request, keys, sessionId)) {
-          pluginApprovalManager.expire(record.id, "worker-dispatch");
-        }
-      }
-    };
+    workerDispatchCell.current = createWorkerDispatchAuthorityRevoker({
+      revokeAttachGrantsForSession,
+      execApprovalManager,
+      pluginApprovalManager,
+    });
     const attachedGatewayExtraHandlers: GatewayRequestHandlers = {
       ...pluginRegistry.gatewayHandlers,
       ...extraHandlers,
@@ -2119,22 +1871,12 @@ export async function startGatewayServer(
                 runtimeState.gatewayLifetimeSidecars = [];
               }
             },
-            ...(workerPlacementRuntime
-              ? {
-                  startWorkerEnvironmentRuntime: async () => {
-                    if (closePreludeStarted) {
-                      return null;
-                    }
-                    return await workerPlacementRuntime.startRuntime({
-                      isClosePreludeStarted: () => closePreludeStarted,
-                      // Close must see the drain handle before reconciliation can yield.
-                      registerSidecar: (sidecar) => {
-                        runtimeState.gatewayLifetimeSidecars.push(sidecar);
-                      },
-                    });
-                  },
-                }
-              : {}),
+            ...createWorkerPlacementStartupSidecarConfig(workerPlacementRuntime, {
+              isClosePreludeStarted: () => closePreludeStarted,
+              registerSidecar: (sidecar) => {
+                runtimeState.gatewayLifetimeSidecars.push(sidecar);
+              },
+            }),
             onSidecarsReady: () => {
               startupSidecarsReady = true;
               activateScheduledServicesWhenReady();
