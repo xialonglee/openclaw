@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { chunkFeishuMarkdown, normalizeFeishuPostMarkdownNewlines } from "./markdown.js";
+import { chunkFeishuMarkdown, materializeFeishuPostMarkdownSoftBreaks } from "./markdown.js";
 
-describe("normalizeFeishuPostMarkdownNewlines", () => {
+describe("materializeFeishuPostMarkdownSoftBreaks", () => {
   it.each([
-    { name: "LF", input: "line one\nline two", expected: "line one\n\nline two" },
-    { name: "CRLF", input: "line one\r\nline two", expected: "line one\r\n\r\nline two" },
-    { name: "CR", input: "line one\rline two", expected: "line one\r\rline two" },
+    { name: "LF", input: "line one\nline two", expected: "line one  \nline two" },
+    { name: "CRLF", input: "line one\r\nline two", expected: "line one  \r\nline two" },
+    { name: "CR", input: "line one\rline two", expected: "line one  \rline two" },
   ])("materializes CommonMark soft breaks with $name endings", ({ input, expected }) => {
-    expect(normalizeFeishuPostMarkdownNewlines(input)).toBe(expected);
+    expect(materializeFeishuPostMarkdownSoftBreaks(input)).toBe(expected);
   });
 
   it("preserves existing paragraph breaks and is idempotent", () => {
-    const once = normalizeFeishuPostMarkdownNewlines("a\nb\n\nc\nd");
-    expect(once).toBe("a\n\nb\n\nc\n\nd");
-    expect(normalizeFeishuPostMarkdownNewlines(once)).toBe(once);
+    const once = materializeFeishuPostMarkdownSoftBreaks("a\nb\n\nc\nd");
+    expect(once).toBe("a  \nb\n\nc  \nd");
+    expect(materializeFeishuPostMarkdownSoftBreaks(once)).toBe(once);
   });
 
   it("preserves fenced and indented code source", () => {
@@ -26,31 +26,38 @@ describe("normalizeFeishuPostMarkdownNewlines", () => {
       "    indented first",
       "    indented second",
     ].join("\n");
-    expect(normalizeFeishuPostMarkdownNewlines(input)).toBe(input);
+    expect(materializeFeishuPostMarkdownSoftBreaks(input)).toBe(input);
   });
 
   it("preserves multiline inline code while materializing the following soft break", () => {
     const input = "run `const first = 1\nconst second = 2` now\nnext";
-    expect(normalizeFeishuPostMarkdownNewlines(input)).toBe(
-      "run `const first = 1\nconst second = 2` now\n\nnext",
+    expect(materializeFeishuPostMarkdownSoftBreaks(input)).toBe(
+      "run `const first = 1\nconst second = 2` now  \nnext",
     );
   });
 
   it("preserves explicit hard breaks and setext headings", () => {
-    expect(normalizeFeishuPostMarkdownNewlines("hard  \nbreak")).toBe("hard  \nbreak");
-    expect(normalizeFeishuPostMarkdownNewlines("Title\n=====\nnext")).toBe("Title\n=====\nnext");
+    expect(materializeFeishuPostMarkdownSoftBreaks("hard  \nbreak")).toBe("hard  \nbreak");
+    expect(materializeFeishuPostMarkdownSoftBreaks("Title\n=====\nnext")).toBe(
+      "Title\n=====\nnext",
+    );
   });
 
   it("preserves structural list boundaries and HTML blocks", () => {
-    expect(normalizeFeishuPostMarkdownNewlines("- first\n- second")).toBe("- first\n- second");
-    expect(normalizeFeishuPostMarkdownNewlines("<div>\nfirst\nsecond\n</div>")).toBe(
+    expect(materializeFeishuPostMarkdownSoftBreaks("- first\n- second")).toBe("- first\n- second");
+    expect(materializeFeishuPostMarkdownSoftBreaks("<div>\nfirst\nsecond\n</div>")).toBe(
       "<div>\nfirst\nsecond\n</div>",
     );
   });
 
+  it("keeps multiline inline formatting and lazy block containers intact", () => {
+    expect(materializeFeishuPostMarkdownSoftBreaks("*first\nsecond*")).toBe("*first  \nsecond*");
+    expect(materializeFeishuPostMarkdownSoftBreaks("> first\nsecond")).toBe("> first  \nsecond");
+  });
+
   it("treats an unclosed fence as code through the end of the document", () => {
     const input = "```ts\nconst first = 1\nconst second = 2";
-    expect(normalizeFeishuPostMarkdownNewlines(input)).toBe(input);
+    expect(materializeFeishuPostMarkdownSoftBreaks(input)).toBe(input);
   });
 });
 

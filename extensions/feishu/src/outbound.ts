@@ -32,7 +32,7 @@ import { cleanupAmbientCommentTypingReaction } from "./comment-reaction.js";
 import { parseFeishuCommentTarget } from "./comment-target.js";
 import { deliverCommentThreadText } from "./drive.js";
 import { resolveFeishuIdentityHeaderTitle } from "./identity-header.js";
-import { chunkFeishuMarkdown, normalizeFeishuPostMarkdownNewlines } from "./markdown.js";
+import { chunkFeishuMarkdown, materializeFeishuPostMarkdownSoftBreaks } from "./markdown.js";
 import {
   sendMediaFeishu,
   shouldSuppressFeishuTextForVoiceMedia,
@@ -391,7 +391,7 @@ async function sendOutboundText(params: {
 
   // Decide card routing on the original text so card content is never
   // modified by post-md newline normalization. Only the post path below
-  // upgrades single newlines to paragraph breaks for Feishu rendering.
+  // materializes CommonMark soft breaks for Feishu rendering.
   if (renderMode === "card" || (renderMode === "auto" && shouldUseCard(text))) {
     return sendMarkdownCardFeishu({
       cfg,
@@ -407,7 +407,7 @@ async function sendOutboundText(params: {
   // materializes prose soft breaks for Feishu post rendering.
   const tableMode = resolveMarkdownTableMode({ cfg, channel: "feishu" });
   const tableConvertedText = convertMarkdownTables(text, tableMode);
-  const normalizedText = normalizeFeishuPostMarkdownNewlines(tableConvertedText);
+  const normalizedText = materializeFeishuPostMarkdownSoftBreaks(tableConvertedText);
 
   // Core chunks raw text before channel rendering. Re-chunk after expansion
   // and keep each fenced-code chunk independently valid Markdown.
@@ -425,17 +425,17 @@ async function sendOutboundText(params: {
 
   const subChunks = chunkFeishuMarkdown(normalizedText, postLimit);
   let lastResult: Awaited<ReturnType<typeof sendMessageFeishu>> | undefined;
+  const preserveThread = replyInThread === true;
   for (const [i, chunk] of subChunks.entries()) {
-    // Only the first subchunk carries the reply target so single-use
-    // implicit reply ids (replyToMode "first") are consumed once per
-    // platform send, matching core sendTextMediaPayload fanout behavior.
+    // Thread roots must accompany every chunk. Ordinary quoted replies remain
+    // first-chunk-only so implicit reply ids are consumed once per fanout.
     lastResult = await sendMessageFeishu({
       cfg,
       to,
       text: chunk,
       accountId,
-      replyToMessageId: i === 0 ? replyToMessageId : undefined,
-      replyInThread: i === 0 ? replyInThread : undefined,
+      replyToMessageId: preserveThread || i === 0 ? replyToMessageId : undefined,
+      replyInThread: preserveThread ? true : i === 0 ? replyInThread : undefined,
     });
   }
   return lastResult!;

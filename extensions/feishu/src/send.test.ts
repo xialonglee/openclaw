@@ -198,7 +198,7 @@ describe("getMessageFeishu", () => {
     const element = JSON.parse(request?.data?.content ?? "null").zh_cn.content[0][0];
     expect(element).toEqual({
       tag: "md",
-      text: "first line\n\nsecond line\n\n```ts\nconst value = 1\n```",
+      text: "first line  \nsecond line\n\n```ts\nconst value = 1\n```",
     });
   });
 
@@ -758,7 +758,7 @@ describe("editMessageFeishu", () => {
 
     const request = mockClientPatch.mock.calls[0]?.[0] as { data?: { content?: string } };
     const element = JSON.parse(request.data?.content ?? "null").zh_cn.content[0][0];
-    expect(element.text).toBe(`${"a".repeat(4_500)}\n\nsecond line`);
+    expect(element.text).toBe(`${"a".repeat(4_500)}  \nsecond line`);
   });
 
   it("rejects edits that exceed the rich-post byte envelope", async () => {

@@ -10,7 +10,7 @@ import type { ClawdbotConfig } from "../runtime-api.js";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { requestFeishuApi } from "./comment-shared.js";
-import { normalizeFeishuPostMarkdownNewlines } from "./markdown.js";
+import { materializeFeishuPostMarkdownSoftBreaks } from "./markdown.js";
 import type { MentionTarget } from "./mention-target.types.js";
 import { buildMentionedCardContent } from "./mention.js";
 import { resolveFeishuCardTemplate } from "./native-card.js";
@@ -610,7 +610,7 @@ export async function sendMessageFeishu(
     channel: "feishu",
   });
 
-  const messageText = normalizeFeishuPostMarkdownNewlines(
+  const messageText = materializeFeishuPostMarkdownSoftBreaks(
     convertMarkdownTables(text ?? "", tableMode),
   );
 
@@ -700,7 +700,7 @@ export async function editMessageFeishu(params: {
     channel: "feishu",
   });
   const messageText = convertMarkdownTables(text!, tableMode);
-  const normalizedText = normalizeFeishuPostMarkdownNewlines(messageText);
+  const normalizedText = materializeFeishuPostMarkdownSoftBreaks(messageText);
   const payload = buildFeishuPostMessagePayload({ messageText: normalizedText });
   assertFeishuPostWithinEnvelope(payload.content, "Feishu message edit");
   const response = await client.im.message.patch({

@@ -18,7 +18,7 @@ import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { resolveConfiguredHttpTimeoutMs } from "./client-timeout.js";
 import { createFeishuClient } from "./client.js";
 import { resolveFeishuIdentityEmoji } from "./identity-header.js";
-import { normalizeFeishuPostMarkdownNewlines } from "./markdown.js";
+import { materializeFeishuPostMarkdownSoftBreaks } from "./markdown.js";
 import { sendMediaFeishu, shouldSuppressFeishuTextForVoiceMedia } from "./media.js";
 import type { MentionTarget } from "./mention-target.types.js";
 import {
@@ -506,7 +506,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   }) => {
     const chunkSource = paramsLocal.useCard
       ? paramsLocal.text
-      : normalizeFeishuPostMarkdownNewlines(
+      : materializeFeishuPostMarkdownSoftBreaks(
           core.channel.text.convertMarkdownTables(paramsLocal.text, tableMode),
         );
     const chunks = resolveTextChunksWithFallback(

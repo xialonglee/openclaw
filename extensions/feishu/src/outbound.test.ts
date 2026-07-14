@@ -2121,7 +2121,7 @@ describe("feishuOutbound.sendText replyToId forwarding", () => {
       accountId: "main",
     });
 
-    expect(sendMessageCall()?.text).toBe("first line\n\nsecond line");
+    expect(sendMessageCall()?.text).toBe("first line  \nsecond line");
   });
 
   it("re-chunks expanded post-md text and scopes reply metadata to the first send", async () => {
@@ -2137,6 +2137,22 @@ describe("feishuOutbound.sendText replyToId forwarding", () => {
     for (const [index, [params]] of sendMessageFeishuMock.mock.calls.entries()) {
       expect(params.text.length).toBeLessThanOrEqual(4_000);
       expect(params.replyToMessageId).toBe(index === 0 ? "om_reply_target" : undefined);
+    }
+  });
+
+  it("keeps every expanded post-md subchunk in the requested thread", async () => {
+    await sendText({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: Array.from({ length: 2_200 }, () => "a").join("\n"),
+      threadId: "om_thread_root",
+      accountId: "main",
+    });
+
+    expect(sendMessageFeishuMock.mock.calls.length).toBeGreaterThan(1);
+    for (const [params] of sendMessageFeishuMock.mock.calls) {
+      expect(params.replyToMessageId).toBe("om_thread_root");
+      expect(params.replyInThread).toBe(true);
     }
   });
 });

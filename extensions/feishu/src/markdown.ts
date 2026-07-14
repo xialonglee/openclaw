@@ -56,11 +56,11 @@ function collectSoftBreakOffsets(text: string): number[] {
 /**
  * Materialize CommonMark soft breaks for Feishu post `md` rendering.
  *
- * The parser identifies only prose soft breaks. Structural line endings and
- * code, HTML, definitions, setext headings, and explicit hard breaks retain
- * their source bytes so normalization cannot corrupt Markdown syntax.
+ * The parser identifies only soft breaks, then upgrades them to CommonMark
+ * hard breaks. Structural line endings and code, HTML, definitions, setext
+ * headings, and existing hard breaks retain their source bytes.
  */
-export function normalizeFeishuPostMarkdownNewlines(text: string): string {
+export function materializeFeishuPostMarkdownSoftBreaks(text: string): string {
   if (!text.includes("\n") && !text.includes("\r")) {
     return text;
   }
@@ -74,7 +74,7 @@ export function normalizeFeishuPostMarkdownNewlines(text: string): string {
   let cursor = 0;
   for (const offset of softBreakOffsets) {
     const lineEnding = text[offset] === "\r" && text[offset + 1] === "\n" ? "\r\n" : text[offset];
-    parts.push(text.slice(cursor, offset), lineEnding, lineEnding);
+    parts.push(text.slice(cursor, offset), "  ", lineEnding);
     cursor = offset + lineEnding.length;
   }
   parts.push(text.slice(cursor));
