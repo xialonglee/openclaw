@@ -1,11 +1,7 @@
 // Feishu tests cover send plugin behavior.
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClawdbotConfig } from "../runtime-api.js";
-import {
-  buildFeishuPostMessagePayload,
-  buildMarkdownCard,
-  normalizeFeishuPostMarkdownNewlines,
-} from "./send.js";
+import { buildFeishuPostMessagePayload, normalizeFeishuPostMarkdownNewlines } from "./send.js";
 
 const {
   mockConvertMarkdownTables,
@@ -61,7 +57,6 @@ vi.mock("./runtime.js", () => ({
   }),
 }));
 
-let buildStructuredCard: typeof import("./send.js").buildStructuredCard;
 let editMessageFeishu: typeof import("./send.js").editMessageFeishu;
 let getMessageFeishu: typeof import("./send.js").getMessageFeishu;
 let listFeishuThreadMessages: typeof import("./send.js").listFeishuThreadMessages;
@@ -221,7 +216,6 @@ describe("normalizeFeishuPostMarkdownNewlines", () => {
 describe("getMessageFeishu", () => {
   beforeAll(async () => {
     ({
-      buildStructuredCard,
       editMessageFeishu,
       getMessageFeishu,
       listFeishuThreadMessages,
@@ -901,78 +895,69 @@ describe("resolveFeishuCardTemplate", () => {
     expect(resolveFeishuCardTemplate("space lobster")).toBeUndefined();
   });
 });
-function expectSchema2WidthConfig(card: unknown) {
-  const typedCard = card as {
-    config: {
-      width_mode?: string;
-      enable_forward?: boolean;
-      wide_screen_mode?: boolean;
-    };
-  };
-
-  expect(typedCard.config.width_mode).toBe("fill");
-  expect(typedCard.config.enable_forward).toBeUndefined();
-  expect(typedCard.config.wide_screen_mode).toBeUndefined();
-}
-
-describe("Feishu card schema config", () => {
-  it.each([
-    {
-      name: "structured card",
-      build: () => buildStructuredCard("hello"),
-    },
-    {
-      name: "markdown card",
-      build: () => buildMarkdownCard("hello"),
-    },
-  ])("$name uses schema-2.0 width config instead of legacy wide screen mode", ({ build }) => {
-    expectSchema2WidthConfig(build());
-  });
-});
-
 describe("Feishu card-mode newline preservation", () => {
-  it("preserves single newlines in markdown card text", () => {
-    const card = buildMarkdownCard("line one\nline two\nline three");
-    const elements = card.body as { elements: Array<{ tag: string; content: string }> };
-    expect(elements.elements[0].content).toBe("line one\nline two\nline three");
-  });
-
-  it("preserves single newlines in structured card text", () => {
-    const card = buildStructuredCard("first\nsecond\nthird");
-    const elements = card.body as { elements: Array<{ tag: string; content: string }> };
-    expect(elements.elements[0].content).toBe("first\nsecond\nthird");
-  });
-
-  it("keeps existing double newlines unchanged in markdown card text", () => {
-    const card = buildMarkdownCard("para a\n\npara b");
-    const elements = card.body as { elements: Array<{ tag: string; content: string }> };
-    expect(elements.elements[0].content).toBe("para a\n\npara b");
-  });
-
-  it("keeps existing double newlines unchanged in structured card text", () => {
-    const card = buildStructuredCard("section 1\n\nsection 2");
-    const elements = card.body as { elements: Array<{ tag: string; content: string }> };
-    expect(elements.elements[0].content).toBe("section 1\n\nsection 2");
-  });
-});
-
-describe("buildStructuredCard", () => {
-  it("falls back to blue when the header template is unsupported", () => {
-    const card = buildStructuredCard("hello", {
-      header: {
-        title: "Agent",
-        template: "space lobster",
+  function createCardClient() {
+    const create = vi.fn().mockResolvedValue({ code: 0, data: { message_id: "om_card" } });
+    mockCreateFeishuClient.mockReturnValue({
+      im: {
+        message: {
+          create,
+          reply: vi.fn(),
+          get: mockClientGet,
+          list: mockClientList,
+          patch: mockClientPatch,
+        },
       },
     });
+    return create;
+  }
 
-    expect(card).toEqual({
-      schema: "2.0",
-      config: { width_mode: "fill" },
-      body: { elements: [{ tag: "markdown", content: "hello" }] },
-      header: {
-        title: { tag: "plain_text", content: "Agent" },
-        template: "blue",
-      },
+  function parseCardContent(create: ReturnType<typeof vi.fn>) {
+    const request = create.mock.calls[0]?.[0] as { data?: { content?: string } } | undefined;
+    return JSON.parse(request?.data?.content ?? "null") as {
+      body: { elements: Array<{ tag: string; content: string }> };
+    };
+  }
+
+  it("preserves single newlines in markdown card text", async () => {
+    const create = createCardClient();
+    await sendMarkdownCardFeishu({
+      cfg: {} as ClawdbotConfig,
+      to: "oc_card",
+      text: "line one\nline two\nline three",
     });
+    expect(parseCardContent(create).body.elements[0].content).toBe(
+      "line one\nline two\nline three",
+    );
+  });
+
+  it("preserves single newlines in structured card text", async () => {
+    const create = createCardClient();
+    await sendStructuredCardFeishu({
+      cfg: {} as ClawdbotConfig,
+      to: "oc_card",
+      text: "first\nsecond\nthird",
+    });
+    expect(parseCardContent(create).body.elements[0].content).toBe("first\nsecond\nthird");
+  });
+
+  it("keeps existing double newlines unchanged in markdown card text", async () => {
+    const create = createCardClient();
+    await sendMarkdownCardFeishu({
+      cfg: {} as ClawdbotConfig,
+      to: "oc_card",
+      text: "para a\n\npara b",
+    });
+    expect(parseCardContent(create).body.elements[0].content).toBe("para a\n\npara b");
+  });
+
+  it("keeps existing double newlines unchanged in structured card text", async () => {
+    const create = createCardClient();
+    await sendStructuredCardFeishu({
+      cfg: {} as ClawdbotConfig,
+      to: "oc_card",
+      text: "section 1\n\nsection 2",
+    });
+    expect(parseCardContent(create).body.elements[0].content).toBe("section 1\n\nsection 2");
   });
 });
