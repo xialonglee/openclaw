@@ -61,7 +61,6 @@ vi.mock("./accounts.js", () => ({
 }));
 vi.mock("./runtime.js", () => ({ getFeishuRuntime: getFeishuRuntimeMock }));
 vi.mock("./send.js", () => ({
-  normalizeFeishuPostMarkdownNewlines: (text: string) => text,
   sendMessageFeishu: sendMessageFeishuMock,
   sendMarkdownCardFeishu: sendMarkdownCardFeishuMock,
   sendStructuredCardFeishu: sendStructuredCardFeishuMock,
@@ -477,7 +476,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
   it("keeps oversized auto mode plain final text on the chunked message path", async () => {
     const runtime = getFeishuRuntimeMock();
     runtime.channel.text.resolveTextChunkLimit.mockReturnValue(10);
-    runtime.channel.text.chunkTextWithMode.mockReturnValue(["0123456789", "abcdefghij"]);
+    runtime.channel.text.chunkMarkdownTextWithMode.mockReturnValue(["0123456789", "abcdefghij"]);
 
     const { options } = createDispatcherHarness();
     await options.deliver({ text: "0123456789abcdefghij" }, { kind: "final" });
@@ -529,7 +528,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
   it("discards partial streaming preview before oversized final text fallback", async () => {
     const runtime = getFeishuRuntimeMock();
     runtime.channel.text.resolveTextChunkLimit.mockReturnValue(10);
-    runtime.channel.text.chunkTextWithMode.mockReturnValue(["final text", " overflow"]);
+    runtime.channel.text.chunkMarkdownTextWithMode.mockReturnValue(["final text", " overflow"]);
 
     const { result, options } = createDispatcherHarness({ runtime: createRuntimeLogger() });
     result.replyOptions.onPartialReply?.({ text: "partial" });
@@ -689,7 +688,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     useNonStreamingBlockAccount();
     const runtime = getFeishuRuntimeMock();
     runtime.channel.text.resolveTextChunkLimit.mockReturnValue(10);
-    runtime.channel.text.chunkTextWithMode.mockImplementation((text: string) =>
+    runtime.channel.text.chunkMarkdownTextWithMode.mockImplementation((text: string) =>
       text === "First paragraph." ? ["First ", "paragraph."] : [text],
     );
     const mentions = [{ openId: "ou_target", name: "Target User", key: "@_user_1" }];
@@ -1080,7 +1079,7 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
   it("skips oversized late final text after streaming card close", async () => {
     const runtime = getFeishuRuntimeMock();
     runtime.channel.text.resolveTextChunkLimit.mockReturnValue(10);
-    runtime.channel.text.chunkTextWithMode.mockReturnValue(["oversized ", "late final"]);
+    runtime.channel.text.chunkMarkdownTextWithMode.mockReturnValue(["oversized ", "late final"]);
 
     const { options } = createDispatcherHarness({
       runtime: createRuntimeLogger(),

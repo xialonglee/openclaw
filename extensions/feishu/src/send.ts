@@ -5,11 +5,12 @@ import {
   isRecord,
   normalizeLowercaseStringOrEmpty,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { convertMarkdownTables, findCodeRegions } from "openclaw/plugin-sdk/text-chunking";
+import { convertMarkdownTables } from "openclaw/plugin-sdk/text-chunking";
 import type { ClawdbotConfig } from "../runtime-api.js";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { requestFeishuApi } from "./comment-shared.js";
+import { normalizeFeishuPostMarkdownNewlines } from "./markdown.js";
 import type { MentionTarget } from "./mention-target.types.js";
 import { buildMentionedCardContent } from "./mention.js";
 import { resolveFeishuCardTemplate } from "./native-card.js";
@@ -530,11 +531,6 @@ type SendFeishuMessageParams = {
   mentions?: MentionTarget[];
   /** Account ID (optional, uses default if not specified) */
   accountId?: string;
-  /** When true, skip normalizeFeishuPostMarkdownNewlines — caller already
-   *  normalized the full text before chunking so re-normalizing risks
-   *  expanding code-block newlines when a chunk boundary falls inside a
-   *  fenced region. */
-  alreadyNormalized?: boolean;
 };
 
 type FeishuPostMessageElement =
@@ -562,73 +558,19 @@ function buildFeishuPostMentionElements(mentions?: MentionTarget[]): FeishuPostM
   return elements;
 }
 
-/**
- * Upgrades single `\n` to `\n\n` outside code regions for Feishu `post` + `tag: md`
- * rendering.
- *
- * Feishu's post+md renderer collapses a single `\n` to a space, so multi-paragraph
- * prose appears cramped unless single newlines are expanded to paragraph breaks.
- * Only `\n\n` is treated as a paragraph break.
- *
- * Fenced and inline code regions are left untouched so code examples preserve
- * their original line shape. The function is idempotent — applying it a second
- * time is a no-op because already-expanded `\n\n` pairs skip the upgrade.
- */
-export function normalizeFeishuPostMarkdownNewlines(text: string): string {
-  if (!text.includes("\n")) {
-    return text;
-  }
-
-  // Record every \n position that lives inside a code region so we can skip it.
-  const codeRegions = findCodeRegions(text);
-  const codeNewlines = new Set<number>();
-  for (const region of codeRegions) {
-    for (let i = region.start; i < region.end; i++) {
-      if (text[i] === "\n") {
-        codeNewlines.add(i);
-      }
-    }
-  }
-
-  // Walk the text line by line.  Insert a blank line between consecutive
-  // non-empty lines whose separator \n is NOT inside a code region.
-  const lines = text.split("\n");
-  const result: string[] = [];
-  let charPos = 0;
-  for (let i = 0; i < lines.length; i++) {
-    result.push(lines[i]);
-    if (i >= lines.length - 1) {
-      continue;
-    }
-    // charPos of the \n that splits lines[i] from lines[i+1]
-    const nlPos = charPos + lines[i].length;
-    charPos = nlPos + 1;
-    if (!codeNewlines.has(nlPos) && lines[i] !== "" && lines[i + 1] !== "") {
-      result.push("");
-    }
-  }
-  return result.join("\n");
-}
-
-export function buildFeishuPostMessagePayload(params: {
+function buildFeishuPostMessagePayload(params: {
   messageText: string;
   mentions?: MentionTarget[];
-  /** When true, skip normalizeFeishuPostMarkdownNewlines — caller already
-   *  normalized the full text before chunking so re-normalizing risks
-   *  expanding code-block newlines when a chunk boundary falls inside a
-   *  fenced region. */
-  alreadyNormalized?: boolean;
 }): {
   content: string;
   msgType: string;
 } {
-  const { messageText, mentions, alreadyNormalized } = params;
-  const text = alreadyNormalized ? messageText : normalizeFeishuPostMarkdownNewlines(messageText);
+  const { messageText, mentions } = params;
   const content: FeishuPostMessageElement[] = [
     ...buildFeishuPostMentionElements(mentions),
     {
       tag: "md",
-      text,
+      text: messageText,
     },
   ];
   return {
@@ -639,6 +581,14 @@ export function buildFeishuPostMessagePayload(params: {
     }),
     msgType: "post",
   };
+}
+
+const FEISHU_POST_MAX_BYTES = 30 * 1024;
+
+function assertFeishuPostWithinEnvelope(content: string, label: string): void {
+  if (Buffer.byteLength(content, "utf8") > FEISHU_POST_MAX_BYTES) {
+    throw new Error(`${label} exceeds the 30 KB rich-post API limit`);
+  }
 }
 
 export async function sendMessageFeishu(
@@ -653,7 +603,6 @@ export async function sendMessageFeishu(
     allowTopLevelReplyFallback,
     mentions,
     accountId,
-    alreadyNormalized,
   } = params;
   const { client, receiveId, receiveIdType } = resolveFeishuSendTarget({ cfg, to, accountId });
   const tableMode = resolveMarkdownTableMode({
@@ -661,13 +610,12 @@ export async function sendMessageFeishu(
     channel: "feishu",
   });
 
-  const messageText = convertMarkdownTables(text ?? "", tableMode);
+  const messageText = normalizeFeishuPostMarkdownNewlines(
+    convertMarkdownTables(text ?? "", tableMode),
+  );
 
-  const { content, msgType } = buildFeishuPostMessagePayload({
-    messageText,
-    mentions,
-    alreadyNormalized,
-  });
+  const { content, msgType } = buildFeishuPostMessagePayload({ messageText, mentions });
+  assertFeishuPostWithinEnvelope(content, "Feishu post");
 
   const directParams = { receiveId, receiveIdType, content, msgType };
   return sendReplyOrFallbackDirect(client, {
@@ -753,19 +701,8 @@ export async function editMessageFeishu(params: {
   });
   const messageText = convertMarkdownTables(text!, tableMode);
   const normalizedText = normalizeFeishuPostMarkdownNewlines(messageText);
-  // Guard expanded post content against Feishu's implicit content limit
-  // on im.message.patch so a near-limit edit that grows past 4000 chars
-  // after normalization is rejected locally with a clear error.
-  const postLimit = 4000;
-  if (normalizedText.length > postLimit) {
-    throw new Error(
-      `Feishu message edit failed: normalized post content (${normalizedText.length} characters) exceeds ${postLimit}-character limit`,
-    );
-  }
-  const payload = buildFeishuPostMessagePayload({
-    messageText: normalizedText,
-    alreadyNormalized: true,
-  });
+  const payload = buildFeishuPostMessagePayload({ messageText: normalizedText });
+  assertFeishuPostWithinEnvelope(payload.content, "Feishu message edit");
   const response = await client.im.message.patch({
     path: { message_id: messageId },
     data: { content: payload.content },

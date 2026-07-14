@@ -18,6 +18,7 @@ import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { resolveConfiguredHttpTimeoutMs } from "./client-timeout.js";
 import { createFeishuClient } from "./client.js";
 import { resolveFeishuIdentityEmoji } from "./identity-header.js";
+import { normalizeFeishuPostMarkdownNewlines } from "./markdown.js";
 import { sendMediaFeishu, shouldSuppressFeishuTextForVoiceMedia } from "./media.js";
 import type { MentionTarget } from "./mention-target.types.js";
 import {
@@ -29,12 +30,7 @@ import {
 } from "./reply-dispatcher-runtime-api.js";
 import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js";
 import { getFeishuRuntime } from "./runtime.js";
-import {
-  normalizeFeishuPostMarkdownNewlines,
-  sendMessageFeishu,
-  sendStructuredCardFeishu,
-  type CardHeaderConfig,
-} from "./send.js";
+import { sendMessageFeishu, sendStructuredCardFeishu, type CardHeaderConfig } from "./send.js";
 import { FeishuStreamingSession, mergeStreamingText } from "./streaming-card.js";
 import { resolveReceiveIdType } from "./targets.js";
 import { addTypingIndicator, removeTypingIndicator, type TypingIndicatorState } from "./typing.js";
@@ -513,12 +509,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       : normalizeFeishuPostMarkdownNewlines(
           core.channel.text.convertMarkdownTables(paramsLocal.text, tableMode),
         );
-    const chunkText = paramsLocal.useCard
-      ? core.channel.text.chunkMarkdownTextWithMode
-      : core.channel.text.chunkTextWithMode;
     const chunks = resolveTextChunksWithFallback(
       chunkSource,
-      chunkText(chunkSource, textChunkLimit, chunkMode),
+      core.channel.text.chunkMarkdownTextWithMode(chunkSource, textChunkLimit, chunkMode),
     );
     for (const [index, chunk] of chunks.entries()) {
       await paramsLocal.sendChunk({
@@ -564,7 +557,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                 replyInThread: effectiveReplyInThread,
                 allowTopLevelReplyFallback,
                 accountId,
-                alreadyNormalized: true,
               });
             },
           });
@@ -592,7 +584,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                     replyInThread: effectiveReplyInThread,
                     allowTopLevelReplyFallback,
                     accountId,
-                    alreadyNormalized: true,
                   });
                 },
               });
@@ -755,7 +746,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                       replyInThread: effectiveReplyInThread,
                       allowTopLevelReplyFallback,
                       accountId,
-                      alreadyNormalized: true,
                       ...(isFirstBlock && isFirst && mentionTargets?.length
                         ? { mentions: mentionTargets }
                         : {}),
@@ -840,7 +830,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                   replyInThread: effectiveReplyInThread,
                   allowTopLevelReplyFallback,
                   accountId,
-                  alreadyNormalized: true,
                   ...(info?.kind === "final" && isFirst && mentionTargets?.length
                     ? { mentions: mentionTargets }
                     : {}),

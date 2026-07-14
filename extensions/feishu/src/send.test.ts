@@ -1,7 +1,6 @@
 // Feishu tests cover send plugin behavior.
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClawdbotConfig } from "../runtime-api.js";
-import { buildFeishuPostMessagePayload, normalizeFeishuPostMarkdownNewlines } from "./send.js";
 
 const {
   mockConvertMarkdownTables,
@@ -64,154 +63,6 @@ let resolveFeishuCardTemplate: typeof import("./send.js").resolveFeishuCardTempl
 let sendMarkdownCardFeishu: typeof import("./send.js").sendMarkdownCardFeishu;
 let sendMessageFeishu: typeof import("./send.js").sendMessageFeishu;
 let sendStructuredCardFeishu: typeof import("./send.js").sendStructuredCardFeishu;
-
-describe("buildFeishuPostMessagePayload", () => {
-  it("prepends structured mention targets as native post at elements", () => {
-    const payload = buildFeishuPostMessagePayload({
-      messageText: "hello **world**",
-      mentions: [
-        { openId: "ou_alice", name: "Alice", key: "@_user_1" },
-        { openId: " ou_bob ", name: " Bob ", key: "@_user_2" },
-      ],
-    });
-
-    expect(payload.msgType).toBe("post");
-    expect(JSON.parse(payload.content)).toEqual({
-      zh_cn: {
-        content: [
-          [
-            { tag: "at", user_id: "ou_alice", user_name: "Alice" },
-            { tag: "at", user_id: "ou_bob", user_name: "Bob" },
-            { tag: "md", text: "hello **world**" },
-          ],
-        ],
-      },
-    });
-  });
-
-  it("leaves body-supplied at tags literal in the markdown element", () => {
-    const payload = buildFeishuPostMessagePayload({
-      messageText: 'please keep <at user_id="ou_body">Body User</at> literal',
-      mentions: [{ openId: "ou_target", name: "Target User", key: "@_user_1" }],
-    });
-
-    expect(JSON.parse(payload.content)).toEqual({
-      zh_cn: {
-        content: [
-          [
-            { tag: "at", user_id: "ou_target", user_name: "Target User" },
-            { tag: "md", text: 'please keep <at user_id="ou_body">Body User</at> literal' },
-          ],
-        ],
-      },
-    });
-  });
-
-  it("upgrades single newlines to paragraph breaks for Feishu md rendering", () => {
-    const payload = buildFeishuPostMessagePayload({
-      messageText: "first line\nsecond line\nthird line",
-    });
-    const element = JSON.parse(payload.content).zh_cn.content[0][0];
-    expect(element.tag).toBe("md");
-    expect(element.text).toBe("first line\n\nsecond line\n\nthird line");
-  });
-
-  it("preserves existing double newlines and code blocks when upgrading newlines", () => {
-    const payload = buildFeishuPostMessagePayload({
-      messageText: [
-        "paragraph one",
-        "",
-        "paragraph two has",
-        "a soft break",
-        "",
-        "```ts",
-        "const x = 1\nconst y = 2",
-        "```",
-        "",
-        "tail with",
-        "soft break",
-      ].join("\n"),
-    });
-    const element = JSON.parse(payload.content).zh_cn.content[0][0];
-    expect(element.text).toBe(
-      [
-        "paragraph one",
-        "",
-        "paragraph two has",
-        "",
-        "a soft break",
-        "",
-        "```ts",
-        "const x = 1\nconst y = 2",
-        "```",
-        "",
-        "tail with",
-        "",
-        "soft break",
-      ].join("\n"),
-    );
-  });
-
-  it("skips normalization when alreadyNormalized is true (pre-chunked text)", () => {
-    const payload = buildFeishuPostMessagePayload({
-      messageText: "line one\nline two\nline three",
-      alreadyNormalized: true,
-    });
-    const element = JSON.parse(payload.content).zh_cn.content[0][0];
-    expect(element.text).toBe("line one\nline two\nline three");
-  });
-
-  it("does not expand code-block newlines in already-normalized chunks split inside a fenced region", () => {
-    // Simulate a sub-chunk that starts mid-code-block — the opening fence
-    // is in a prior chunk so findCodeRegions would not detect this as code.
-    // alreadyNormalized must prevent the second pass from expanding code
-    // newlines to paragraph breaks.
-    const payload = buildFeishuPostMessagePayload({
-      messageText: "code line 1\ncode line 2\ncode line 3",
-      alreadyNormalized: true,
-    });
-    const element = JSON.parse(payload.content).zh_cn.content[0][0];
-    // Without the flag, normalizeFeishuPostMarkdownNewlines would expand
-    // these single newlines to \n\n. With the flag, they stay single.
-    expect(element.text).toBe("code line 1\ncode line 2\ncode line 3");
-  });
-});
-
-describe("normalizeFeishuPostMarkdownNewlines", () => {
-  it("upgrades single newlines to paragraph breaks", () => {
-    expect(normalizeFeishuPostMarkdownNewlines("line one\nline two\nline three")).toBe(
-      "line one\n\nline two\n\nline three",
-    );
-  });
-
-  it("preserves existing double newlines", () => {
-    expect(normalizeFeishuPostMarkdownNewlines("para a\n\npara b")).toBe("para a\n\npara b");
-  });
-
-  it("preserves fenced code block internals", () => {
-    const input = "intro\n```\ncode line 1\ncode line 2\n```\noutro";
-    expect(normalizeFeishuPostMarkdownNewlines(input)).toBe(
-      "intro\n\n```\ncode line 1\ncode line 2\n```\n\noutro",
-    );
-  });
-
-  it("preserves inline code spans", () => {
-    const input = "run `const x = 1\nconst y = 2` now\nmore text";
-    const result = normalizeFeishuPostMarkdownNewlines(input);
-    expect(result).toContain("`const x = 1\nconst y = 2`");
-    expect(result).toBe("run `const x = 1\nconst y = 2` now\n\nmore text");
-  });
-
-  it("does not alter text without newlines", () => {
-    expect(normalizeFeishuPostMarkdownNewlines("plain single line")).toBe("plain single line");
-  });
-
-  it("is idempotent", () => {
-    const once = normalizeFeishuPostMarkdownNewlines("a\nb\n\nc\nd");
-    const twice = normalizeFeishuPostMarkdownNewlines(once);
-    expect(twice).toBe(once);
-  });
-});
 
 describe("getMessageFeishu", () => {
   beforeAll(async () => {
@@ -320,6 +171,34 @@ describe("getMessageFeishu", () => {
           },
         ],
       },
+    });
+  });
+
+  it("materializes prose soft breaks in the public post send path", async () => {
+    const create = vi.fn().mockResolvedValue({ code: 0, data: { message_id: "om_newlines" } });
+    mockCreateFeishuClient.mockReturnValue({
+      im: {
+        message: {
+          create,
+          reply: vi.fn(),
+          get: mockClientGet,
+          list: mockClientList,
+          patch: mockClientPatch,
+        },
+      },
+    });
+
+    await sendMessageFeishu({
+      cfg: {} as ClawdbotConfig,
+      to: "oc_send",
+      text: "first line\nsecond line\n\n```ts\nconst value = 1\n```",
+    });
+
+    const request = create.mock.calls[0]?.[0] as { data?: { content?: string } } | undefined;
+    const element = JSON.parse(request?.data?.content ?? "null").zh_cn.content[0][0];
+    expect(element).toEqual({
+      tag: "md",
+      text: "first line\n\nsecond line\n\n```ts\nconst value = 1\n```",
     });
   });
 
@@ -865,6 +744,32 @@ describe("editMessageFeishu", () => {
       },
     });
     expect(result).toEqual({ messageId: "om_edit", contentType: "post" });
+  });
+
+  it("normalizes post edits and accepts content beyond the delivery chunk size", async () => {
+    mockClientPatch.mockResolvedValueOnce({ code: 0 });
+    const text = `${"a".repeat(4_500)}\nsecond line`;
+
+    await editMessageFeishu({
+      cfg: {} as ClawdbotConfig,
+      messageId: "om_edit",
+      text,
+    });
+
+    const request = mockClientPatch.mock.calls[0]?.[0] as { data?: { content?: string } };
+    const element = JSON.parse(request.data?.content ?? "null").zh_cn.content[0][0];
+    expect(element.text).toBe(`${"a".repeat(4_500)}\n\nsecond line`);
+  });
+
+  it("rejects edits that exceed the rich-post byte envelope", async () => {
+    await expect(
+      editMessageFeishu({
+        cfg: {} as ClawdbotConfig,
+        messageId: "om_edit",
+        text: "界".repeat(11_000),
+      }),
+    ).rejects.toThrow("Feishu message edit exceeds the 30 KB rich-post API limit");
+    expect(mockClientPatch).not.toHaveBeenCalled();
   });
 
   it("patches interactive content for card edits", async () => {

@@ -32,6 +32,7 @@ import { cleanupAmbientCommentTypingReaction } from "./comment-reaction.js";
 import { parseFeishuCommentTarget } from "./comment-target.js";
 import { deliverCommentThreadText } from "./drive.js";
 import { resolveFeishuIdentityHeaderTitle } from "./identity-header.js";
+import { chunkFeishuMarkdown, normalizeFeishuPostMarkdownNewlines } from "./markdown.js";
 import {
   sendMediaFeishu,
   shouldSuppressFeishuTextForVoiceMedia,
@@ -42,14 +43,13 @@ import {
   resolveFeishuCardTemplate,
   sanitizeNativeFeishuCard,
 } from "./native-card.js";
-import { chunkTextForOutbound, type ChannelOutboundAdapter } from "./outbound-runtime-api.js";
+import type { ChannelOutboundAdapter } from "./outbound-runtime-api.js";
 import {
   assertFeishuCardWithinEnvelope,
   buildFeishuPresentationCardElements,
   isFeishuCardWithinEnvelope,
 } from "./presentation-card.js";
 import {
-  normalizeFeishuPostMarkdownNewlines,
   sendCardFeishu,
   sendMarkdownCardFeishu,
   sendMessageFeishu,
@@ -403,22 +403,15 @@ async function sendOutboundText(params: {
     });
   }
 
-  // Post-md path: convert markdown tables before normalizing newlines.
-  // Normalization inserts blank lines between consecutive non-empty lines,
-  // which breaks markdown table row contiguity for the converter. Converting
-  // first preserves table structure; then single newlines are upgraded to
-  // paragraph breaks for Feishu post rendering.  sendMessageFeishu will
-  // run convertMarkdownTables again internally, but that is a no-op on
-  // already-converted text.
+  // Tables need contiguous source rows, so convert them before the parser
+  // materializes prose soft breaks for Feishu post rendering.
   const tableMode = resolveMarkdownTableMode({ cfg, channel: "feishu" });
   const tableConvertedText = convertMarkdownTables(text, tableMode);
   const normalizedText = normalizeFeishuPostMarkdownNewlines(tableConvertedText);
 
-  // The outbound chunker measures raw text before expansion, so a chunk
-  // that was within the 4000-character boundary can exceed it after
-  // normalization. Re-chunk expanded text before sending so every post
-  // payload stays inside Feishu's content limit.
-  const postLimit = 4000;
+  // Core chunks raw text before channel rendering. Re-chunk after expansion
+  // and keep each fenced-code chunk independently valid Markdown.
+  const postLimit = FEISHU_TEXT_CHUNK_LIMIT;
   if (normalizedText.length <= postLimit) {
     return sendMessageFeishu({
       cfg,
@@ -427,11 +420,10 @@ async function sendOutboundText(params: {
       accountId,
       replyToMessageId,
       replyInThread,
-      alreadyNormalized: true,
     });
   }
 
-  const subChunks = chunkTextForOutbound(normalizedText, postLimit);
+  const subChunks = chunkFeishuMarkdown(normalizedText, postLimit);
   let lastResult: Awaited<ReturnType<typeof sendMessageFeishu>> | undefined;
   for (const [i, chunk] of subChunks.entries()) {
     // Only the first subchunk carries the reply target so single-use
@@ -444,7 +436,6 @@ async function sendOutboundText(params: {
       accountId,
       replyToMessageId: i === 0 ? replyToMessageId : undefined,
       replyInThread: i === 0 ? replyInThread : undefined,
-      alreadyNormalized: true,
     });
   }
   return lastResult!;
@@ -458,7 +449,7 @@ async function sendFeishuFallbackPayload(params: {
   const ctx = { ...params.ctx, payload: params.payload };
   const mediaUrls = normalizeStringEntries(resolvePayloadMediaUrls(params.payload));
   const text = params.payload.text ?? "";
-  const textChunks = text ? chunkTextForOutbound(text, FEISHU_TEXT_CHUNK_LIMIT) : [];
+  const textChunks = text ? chunkFeishuMarkdown(text, FEISHU_TEXT_CHUNK_LIMIT) : [];
   const shouldSeparate =
     mediaUrls.length > 0 && (params.separateMediaAndText === true || textChunks.length > 1);
   if (!shouldSeparate) {
@@ -512,7 +503,7 @@ async function sendFeishuFallbackPayload(params: {
 
 export const feishuOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
-  chunker: (text, limit) => chunkTextForOutbound(text, limit),
+  chunker: chunkFeishuMarkdown,
   chunkerMode: "markdown",
   textChunkLimit: FEISHU_TEXT_CHUNK_LIMIT,
   presentationCapabilities: {

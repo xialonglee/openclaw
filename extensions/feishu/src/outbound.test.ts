@@ -31,7 +31,6 @@ vi.mock("./media.js", () => ({
 vi.mock("./send.js", () => ({
   editMessageFeishu: vi.fn(),
   getMessageFeishu: vi.fn(),
-  normalizeFeishuPostMarkdownNewlines: (text: string) => text,
   sendCardFeishu: sendCardFeishuMock,
   sendMessageFeishu: sendMessageFeishuMock,
   sendMarkdownCardFeishu: sendMarkdownCardFeishuMock,
@@ -2114,18 +2113,31 @@ describe("feishuOutbound.sendText replyToId forwarding", () => {
     expect(sendMessageCall()?.replyInThread).toBe(false);
   });
 
-  it("marks alreadyNormalized on post-md sends so chunks skip redundant normalization", async () => {
+  it("materializes post-md prose soft breaks after raw render-mode routing", async () => {
     await sendText({
       cfg: emptyConfig,
       to: "chat_1",
-      text: "post-md text",
+      text: "first line\nsecond line",
       accountId: "main",
     });
 
-    // Normal post-md send goes through sendOutboundText which normalizes
-    // before calling sendMessageFeishu — the flag must be set so the
-    // payload builder does not normalize again.
-    expect(sendMessageCall()?.alreadyNormalized).toBe(true);
+    expect(sendMessageCall()?.text).toBe("first line\n\nsecond line");
+  });
+
+  it("re-chunks expanded post-md text and scopes reply metadata to the first send", async () => {
+    await sendText({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: Array.from({ length: 2_200 }, () => "a").join("\n"),
+      replyToId: "om_reply_target",
+      accountId: "main",
+    });
+
+    expect(sendMessageFeishuMock.mock.calls.length).toBeGreaterThan(1);
+    for (const [index, [params]] of sendMessageFeishuMock.mock.calls.entries()) {
+      expect(params.text.length).toBeLessThanOrEqual(4_000);
+      expect(params.replyToMessageId).toBe(index === 0 ? "om_reply_target" : undefined);
+    }
   });
 });
 
