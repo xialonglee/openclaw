@@ -1076,6 +1076,50 @@ describe("logs cli", () => {
       expect(stderrWrites.join("")).toContain("Gateway not reachable");
       expect(exitSpy).toHaveBeenCalledWith(1);
     });
+
+    it("routes terminal reset to stderr in --follow --json so stdout stays parseable JSON in a PTY", async () => {
+      callGatewayFromCli.mockRejectedValueOnce(
+        new GatewayTransportError({
+          kind: "closed",
+          code: 4001,
+          reason: "unauthorized",
+          connectionDetails: { url: "ws://127.0.0.1:18789", urlSource: "cli", message: "" },
+          message: "gateway closed (4001 unauthorized): unauthorized",
+        }),
+      );
+
+      const stdoutWrites = captureStdoutWrites();
+      const stderrWrites = captureStderrWrites();
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+
+      // Simulate PTY: stderr is a TTY so the terminal reset fires and gets
+      // routed to stderr instead of stdout. Object.defineProperty is needed
+      // because isTTY is an inherited getter not reachable via vi.spyOn.
+      const prevDescriptor = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+      Object.defineProperty(process.stderr, "isTTY", {
+        get: () => true,
+        configurable: true,
+      });
+      try {
+        await runLogsCli(["logs", "--follow", "--json", "--url", "ws://127.0.0.1:18789"]);
+      } finally {
+        if (prevDescriptor) {
+          Object.defineProperty(process.stderr, "isTTY", prevDescriptor);
+        } else {
+          delete (process.stderr as unknown as Record<string, unknown>).isTTY;
+        }
+      }
+
+      // stdout must contain only parseable JSON — no ANSI escape bytes
+      const stdout = stdoutWrites.join("");
+      expect(stdout).not.toContain("\x1b[");
+
+      // stderr receives the terminal reset instead of stdout
+      const stderr = stderrWrites.join("");
+      expect(stderr).toContain("\x1b[");
+
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    });
   });
 
   it("does not use local fallback for explicit Gateway URLs", async () => {
