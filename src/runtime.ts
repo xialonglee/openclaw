@@ -5,7 +5,12 @@ import { restoreTerminalState } from "../packages/terminal-core/src/restore.js";
 export type RuntimeEnv = {
   log: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
-  exit: (code: number) => void;
+  /**
+   * Exit the process after restoring terminal state.
+   * Pass `resetStream` to route the ANSI reset sequence to a specific
+   * stream (e.g. stderr) when structured output on stdout must stay clean.
+   */
+  exit: (code: number, opts?: { resetStream?: NodeJS.WriteStream }) => void;
 };
 
 export type OutputRuntimeEnv = RuntimeEnv & {
@@ -88,8 +93,11 @@ function createRuntimeIo(): Pick<OutputRuntimeEnv, "log" | "error" | "writeStdou
 
 export const defaultRuntime: OutputRuntimeEnv = {
   ...createRuntimeIo(),
-  exit: (code) => {
-    restoreTerminalState("runtime exit", { resumeStdinIfPaused: false });
+  exit: (code, opts) => {
+    restoreTerminalState("runtime exit", {
+      resumeStdinIfPaused: false,
+      resetStream: opts?.resetStream,
+    });
     process.exit(code);
     throw new Error("unreachable"); // satisfies tests when mocked
   },
@@ -109,7 +117,7 @@ export class ExitError extends Error {
 export function createNonExitingRuntime(): OutputRuntimeEnv {
   return {
     ...createRuntimeIo(),
-    exit: (code: number) => {
+    exit: (code: number, _opts?: { resetStream?: NodeJS.WriteStream }) => {
       throw new ExitError(code);
     },
   };

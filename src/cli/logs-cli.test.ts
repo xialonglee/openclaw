@@ -98,13 +98,20 @@ vi.mock("./gateway-rpc.js", async () => {
 
 vi.mock("../runtime.js", async () => {
   const actual = await vi.importActual<typeof import("../runtime.js")>("../runtime.js");
+  const terminalRestore = await vi.importActual<
+    typeof import("../../packages/terminal-core/src/restore.js")
+  >("../../packages/terminal-core/src/restore.js");
   return {
     ...actual,
     defaultRuntime: {
       ...actual.defaultRuntime,
       // Override exit to not throw after process.exit — tests mock process.exit
       // so the unreachable throw in the real exit would escape unhandled.
-      exit: vi.fn((code: number) => {
+      exit: vi.fn((code: number, opts?: { resetStream?: NodeJS.WriteStream }) => {
+        terminalRestore.restoreTerminalState("runtime exit", {
+          resumeStdinIfPaused: false,
+          resetStream: opts?.resetStream,
+        });
         process.exit(code);
       }),
     },

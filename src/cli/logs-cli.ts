@@ -10,7 +10,6 @@ import {
 import { readConnectPairingRequiredMessage } from "../../packages/gateway-protocol/src/connect-error-details.js";
 import { formatDocsLink } from "../../packages/terminal-core/src/links.js";
 import { clearActiveProgressLine } from "../../packages/terminal-core/src/progress-line.js";
-import { restoreTerminalState } from "../../packages/terminal-core/src/restore.js";
 import { createSafeStreamWriter } from "../../packages/terminal-core/src/stream-writer.js";
 import { colorize, isRich, theme } from "../../packages/terminal-core/src/theme.js";
 import {
@@ -685,17 +684,10 @@ export function registerLogsCli(program: Command) {
           errorLine,
         );
         // Route terminal reset to stderr in JSON mode so structured
-        // stdout stays parseable. Text mode uses the canonical
-        // defaultRuntime.exit which writes the reset to stdout.
-        if (jsonMode) {
-          restoreTerminalState("logs exit", {
-            resumeStdinIfPaused: false,
-            resetStream: process.stderr,
-          });
-          process.exit(1);
-        } else {
-          defaultRuntime.exit(1);
-        }
+        // stdout stays parseable. Text mode resets to stdout by default.
+        defaultRuntime.exit(1, {
+          resetStream: jsonMode ? process.stderr : undefined,
+        });
         return;
       }
       if (followRetryAttempt > 0) {
