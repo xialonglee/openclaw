@@ -1,8 +1,7 @@
 // Tests that force-clearing an embedded run persists terminal session state.
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { testing as replyRunTesting } from "../../auto-reply/reply/reply-run-registry.test-support.js";
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/io.js";
 import { loadSessionEntry, upsertSessionEntry } from "../../config/sessions/session-accessor.js";
@@ -27,20 +26,19 @@ function createRunHandle(
 }
 
 describe("force-clear terminal state persistence", () => {
-  let tempDir: string;
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
   let storePath: string;
 
-  beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-forceclear-"));
+  beforeEach(() => {
+    const tempDir = tempDirs.make("openclaw-forceclear-");
     storePath = path.join(tempDir, "sessions.json");
     setRuntimeConfigSnapshot({ session: { store: storePath } } as unknown as OpenClawConfig);
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     clearRuntimeConfigSnapshot();
     testing.resetActiveEmbeddedRuns();
     replyRunTesting.resetReplyRunRegistry();
-    await fs.rm(tempDir, { recursive: true, force: true });
   });
 
   it("persists killed status after a force-cleared run", async () => {
