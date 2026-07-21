@@ -1181,25 +1181,35 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     }
   };
 
-  const groupsAdd = async (name: string): Promise<SessionGroupMutationResult> => {
-    const scope = captureConnection();
-    if (!scope) {
-      return "stale";
-    }
-    const advertised = isGatewayMethodAdvertised(gateway.snapshot, GROUPS_ADD_METHOD);
+  type GroupMutationRequest =
+    | {
+        method: typeof GROUPS_ADD_METHOD;
+        params: { name: string };
+        fallbackNames: readonly string[];
+      }
+    | {
+        method: typeof GROUPS_REORDER_METHOD;
+        params: { names: string[] };
+        fallbackNames: readonly string[];
+      };
+
+  const requestGroupMutation = async (
+    scope: SessionConnectionScope,
+    request: GroupMutationRequest,
+  ): Promise<SessionGroupMutationResult> => {
+    const advertised = isGatewayMethodAdvertised(gateway.snapshot, request.method);
     try {
       if (advertised === true) {
-        const result = await scope.client.request(GROUPS_ADD_METHOD, { name });
+        const result = await scope.client.request(request.method, request.params);
         if (!isCurrentConnection(scope)) {
           return "stale";
         }
         publishGroups(readSessionCustomGroupNames(result));
         return "completed";
       }
-      // Legacy gateways only expose the full-replacement method; append locally
-      // and send the complete catalog so older servers still work.
+      // Legacy gateways only expose the full-replacement method.
       const result = await scope.client.request(GROUPS_PUT_METHOD, {
-        names: [...state.groups, name],
+        names: [...request.fallbackNames],
       });
       if (!isCurrentConnection(scope)) {
         return "stale";
@@ -1211,31 +1221,29 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     }
   };
 
+  const groupsAdd = async (name: string): Promise<SessionGroupMutationResult> => {
+    const scope = captureConnection();
+    if (!scope) {
+      return "stale";
+    }
+    return requestGroupMutation(scope, {
+      method: GROUPS_ADD_METHOD,
+      params: { name },
+      // Append locally and send the complete catalog so older servers still work.
+      fallbackNames: [...state.groups, name],
+    });
+  };
+
   const groupsReorder = async (names: readonly string[]): Promise<SessionGroupMutationResult> => {
     const scope = captureConnection();
     if (!scope) {
       return "stale";
     }
-    const advertised = isGatewayMethodAdvertised(gateway.snapshot, GROUPS_REORDER_METHOD);
-    try {
-      if (advertised === true) {
-        const result = await scope.client.request(GROUPS_REORDER_METHOD, { names: [...names] });
-        if (!isCurrentConnection(scope)) {
-          return "stale";
-        }
-        publishGroups(readSessionCustomGroupNames(result));
-        return "completed";
-      }
-      // Legacy gateways only expose the full-replacement method.
-      const result = await scope.client.request(GROUPS_PUT_METHOD, { names: [...names] });
-      if (!isCurrentConnection(scope)) {
-        return "stale";
-      }
-      publishGroups(readSessionCustomGroupNames(result));
-      return "completed";
-    } catch (error) {
-      return finishGroupMutationFailure(isCurrentConnection(scope), error);
-    }
+    return requestGroupMutation(scope, {
+      method: GROUPS_REORDER_METHOD,
+      params: { names: [...names] },
+      fallbackNames: names,
+    });
   };
 
   const groupsRename = async (from: string, to: string): Promise<SessionGroupMutationResult> => {
