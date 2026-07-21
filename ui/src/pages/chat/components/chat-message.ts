@@ -782,6 +782,7 @@ type RenderMessageGroupOptions = {
   onAssistantAttachmentLoaded?: () => void;
   assistantName?: string;
   assistantAvatar?: string | null;
+  userId?: string | null;
   userName?: string | null;
   userAvatar?: string | null;
   basePath?: string;
@@ -840,9 +841,12 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
     avatar: opts.userAvatar ?? null,
   });
   const userLabel = group.senderLabel?.trim();
+  const isCurrentUser = opts.userId && group.sender?.id === opts.userId;
   const who =
     normalizedRole === "user"
-      ? (userLabel ?? resolvedUserName)
+      ? isCurrentUser
+        ? resolvedUserName
+        : (userLabel ?? resolvedUserName)
       : normalizedRole === "assistant"
         ? (userLabel ?? assistantName)
         : normalizedRole === "tool"
