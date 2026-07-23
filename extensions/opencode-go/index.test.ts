@@ -252,7 +252,7 @@ describe("opencode-go provider plugin", () => {
     const deepSeekPro = result.provider.models.find((model) => model.id === "deepseek-v4-pro");
     const glm52 = result.provider.models.find((model) => model.id === "glm-5.2");
 
-    expect(result.provider.models).toHaveLength(18);
+    expect(result.provider.models).toHaveLength(21);
     expect(deepSeekPro).toMatchObject({
       provider: "opencode-go",
       contextWindow: 1_000_000,
