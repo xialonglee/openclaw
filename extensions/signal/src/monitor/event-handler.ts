@@ -66,6 +66,7 @@ import { resolveSignalReplyToMode } from "../accounts.js";
 import {
   maybeResolveSignalApprovalReaction,
   resolveSignalApprovalConversationKey,
+  formatSignalApprovalLosingFeedbackLabel,
 } from "../approval-reactions.js";
 import {
   formatSignalPairingIdLine,
@@ -860,6 +861,22 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
         targetAuthor: params.reaction.targetAuthor,
         targetAuthorUuid: params.reaction.targetAuthorUuid,
         logVerboseMessage: logVerbose,
+        onLosingRace: async ({ conversationKey: targetKey, approvalStatus, approvalDecision }) => {
+          const text = `⚠️ Approval already resolved: ${formatSignalApprovalLosingFeedbackLabel(approvalStatus, approvalDecision)}`;
+          try {
+            await sendMessageSignal(targetKey, text, {
+              cfg: deps.cfg,
+              baseUrl: deps.baseUrl,
+              account: deps.account,
+              maxBytes: deps.mediaMaxBytes,
+              accountId: deps.accountId,
+            });
+          } catch (err) {
+            logVerbose(
+              `signal: failed to send losing-race feedback to ${targetKey}: ${String(err)}`,
+            );
+          }
+        },
       }))
     ) {
       return true;
