@@ -1,0 +1,97 @@
+name: Proof LM Studio error body credential redaction
+
+on:
+  push:
+    branches: [fix/gap-lmstudio-redact-error-body-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: f5add8197fa990890d3f96142cba1523e9c6c0df
+      AFTER_SHA: d87e52ac98afce246d71f032934888606deaba28
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      # ── ① Checkout proof branch to get the proof test file ──────────
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: fix/gap-lmstudio-redact-error-body-proof
+          path: proof-branch
+
+      # ── ② Setup Node ─────────────────────────────────────────────────
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      # ── ③ Fetch immutable source at BEFORE/AFTER SHAs ────────────────
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      # ── ④ BEFORE: install deps, copy proof test, run ─────────────────
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove before fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp "$GITHUB_WORKSPACE/proof-branch/extensions/lmstudio/src/proof-redact.test.ts" \
+             extensions/lmstudio/src/proof-redact.test.ts
+          PROOF_MODE=before npx vitest run \
+            --config test/vitest/vitest.extension-providers.config.ts \
+            extensions/lmstudio/src/proof-redact.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/proof-before.log"
+
+      # ── ⑤ AFTER: install deps, copy proof test, run ──────────────────
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+
+      - name: Prove after fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp "$GITHUB_WORKSPACE/proof-branch/extensions/lmstudio/src/proof-redact.test.ts" \
+             extensions/lmstudio/src/proof-redact.test.ts
+          PROOF_MODE=after npx vitest run \
+            --config test/vitest/vitest.extension-providers.config.ts \
+            extensions/lmstudio/src/proof-redact.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/proof-after.log"
+
+      # ── ⑥ Upload artifacts ───────────────────────────────────────────
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-lmstudio-redact-error-body
+          path: |
+            ${{ runner.temp }}/proof-before.log
+            ${{ runner.temp }}/proof-after.log
+          retention-days: 30
