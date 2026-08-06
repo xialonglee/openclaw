@@ -1,0 +1,259 @@
+name: Proof zalouser threadId prefix stripping
+
+on:
+  push:
+    branches: [fix/gap-zalouser-threadid-prefix-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BEFORE_SHA: 26a58bcd92baeb8ed6595d5202b16bd4e08be704
+      AFTER_SHA: 4a928b82d27b303d2b356183eb8d576a972af793
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove before fix — prefixed threadId passes verbatim
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+
+          cat > extensions/zalouser/proof.test.ts << 'PROOFEOF'
+          import { beforeEach, describe, expect, it, vi } from "vitest";
+          import { sendMessageZalouser } from "./src/send.js";
+          import { createZalouserTool } from "./src/tool.js";
+
+          vi.mock("./src/send.js", () => ({
+            sendMessageZalouser: vi.fn(),
+            sendImageZalouser: vi.fn(),
+            sendLinkZalouser: vi.fn(),
+            sendReactionZalouser: vi.fn(),
+          }));
+
+          vi.mock("./src/zalo-js.js", () => ({
+            checkZaloAuthenticated: vi.fn(),
+            getZaloUserInfo: vi.fn(),
+            listZaloFriendsMatching: vi.fn(),
+            listZaloGroupsMatching: vi.fn(),
+          }));
+
+          const mockSendMessage = vi.mocked(sendMessageZalouser);
+
+          describe("zalouser threadId prefix proof", () => {
+            beforeEach(() => {
+              mockSendMessage.mockReset();
+            });
+
+            it("BEFORE: group: prefix passed verbatim (bug)", async () => {
+              mockSendMessage.mockResolvedValueOnce({ ok: true, messageId: "m-1" } as never);
+              await createZalouserTool().execute("t1", {
+                action: "send",
+                threadId: "group:grp-1",
+                message: "hello",
+              });
+              // BEFORE fix: threadId is passed verbatim as "group:grp-1"
+              // This causes the Zalo API to fail in production.
+              const call = mockSendMessage.mock.calls[0];
+              const actualThreadId = call[0];
+              console.log(
+                "[proof] scene=prefixed-threadid-before status=info " +
+                "threadId=" + JSON.stringify(actualThreadId)
+              );
+              expect(actualThreadId).toBe("group:grp-1");
+            });
+
+            it("BEFORE: zalouser:user: prefix passed verbatim (bug)", async () => {
+              mockSendMessage.mockResolvedValueOnce({ ok: true, messageId: "m-2" } as never);
+              await createZalouserTool().execute("t2", {
+                action: "send",
+                threadId: "zalouser:user:usr-2",
+                message: "hi",
+              });
+              const call = mockSendMessage.mock.calls[0];
+              const actualThreadId = call[0];
+              console.log(
+                "[proof] scene=zalouser-prefix-before status=info " +
+                "threadId=" + JSON.stringify(actualThreadId)
+              );
+              expect(actualThreadId).toBe("zalouser:user:usr-2");
+            });
+          });
+          PROOFEOF
+
+          npx vitest run extensions/zalouser/proof.test.ts --reporter=verbose 2>&1 | tee "$RUNNER_TEMP/proof-before.log"
+          rm -f extensions/zalouser/proof.test.ts
+          echo "[proof] scene=prefix-stripping-before status=pass before=prefix-passed-verbatim"
+
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+
+      - name: Prove after fix — prefixed threadId is stripped
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+
+          cat > extensions/zalouser/proof.test.ts << 'PROOFEOF'
+          import { beforeEach, describe, expect, it, vi } from "vitest";
+          import { sendMessageZalouser } from "./src/send.js";
+          import { createZalouserTool } from "./src/tool.js";
+
+          vi.mock("./src/send.js", () => ({
+            sendMessageZalouser: vi.fn(),
+            sendImageZalouser: vi.fn(),
+            sendLinkZalouser: vi.fn(),
+            sendReactionZalouser: vi.fn(),
+          }));
+
+          vi.mock("./src/zalo-js.js", () => ({
+            checkZaloAuthenticated: vi.fn(),
+            getZaloUserInfo: vi.fn(),
+            listZaloFriendsMatching: vi.fn(),
+            listZaloGroupsMatching: vi.fn(),
+          }));
+
+          const mockSendMessage = vi.mocked(sendMessageZalouser);
+
+          describe("zalouser threadId prefix proof", () => {
+            beforeEach(() => {
+              mockSendMessage.mockReset();
+            });
+
+            it("AFTER: group: prefix stripped to bare ID", async () => {
+              mockSendMessage.mockResolvedValueOnce({ ok: true, messageId: "m-1" } as never);
+              await createZalouserTool().execute("t1", {
+                action: "send",
+                threadId: "group:grp-1",
+                message: "hello",
+              });
+              // AFTER fix: threadId is stripped to "grp-1"
+              const call = mockSendMessage.mock.calls[0];
+              const actualThreadId = call[0];
+              const actualIsGroup = (call[2] as { isGroup?: boolean }).isGroup;
+              console.log(
+                "[proof] scene=prefixed-threadid-after status=info " +
+                "threadId=" + JSON.stringify(actualThreadId) + " " +
+                "isGroup=" + JSON.stringify(actualIsGroup)
+              );
+              expect(actualThreadId).toBe("grp-1");
+              expect(actualIsGroup).toBe(true);
+            });
+
+            it("AFTER: zalouser:user: prefix stripped to bare ID", async () => {
+              mockSendMessage.mockResolvedValueOnce({ ok: true, messageId: "m-2" } as never);
+              await createZalouserTool().execute("t2", {
+                action: "send",
+                threadId: "zalouser:user:usr-2",
+                message: "hi",
+              });
+              const call = mockSendMessage.mock.calls[0];
+              const actualThreadId = call[0];
+              const actualIsGroup = (call[2] as { isGroup?: boolean }).isGroup;
+              console.log(
+                "[proof] scene=zalouser-prefix-after status=info " +
+                "threadId=" + JSON.stringify(actualThreadId) + " " +
+                "isGroup=" + JSON.stringify(actualIsGroup)
+              );
+              expect(actualThreadId).toBe("usr-2");
+              expect(actualIsGroup).toBe(false);
+            });
+
+            it("AFTER: explicit isGroup override honored over prefix", async () => {
+              mockSendMessage.mockResolvedValueOnce({ ok: true, messageId: "m-3" } as never);
+              await createZalouserTool().execute("t3", {
+                action: "send",
+                threadId: "zalouser:group:grp-3",
+                message: "yo",
+                isGroup: false,
+              });
+              const call = mockSendMessage.mock.calls[0];
+              const actualThreadId = call[0];
+              const actualIsGroup = (call[2] as { isGroup?: boolean }).isGroup;
+              console.log(
+                "[proof] scene=isgroup-override-after status=info " +
+                "threadId=" + JSON.stringify(actualThreadId) + " " +
+                "isGroup=" + JSON.stringify(actualIsGroup)
+              );
+              expect(actualThreadId).toBe("grp-3");
+              expect(actualIsGroup).toBe(false);
+            });
+
+            it("AFTER: bare threadId without prefix works unchanged", async () => {
+              mockSendMessage.mockResolvedValueOnce({ ok: true, messageId: "m-4" } as never);
+              await createZalouserTool().execute("t4", {
+                action: "send",
+                threadId: "t-direct",
+                message: "hey",
+                isGroup: false,
+              });
+              const call = mockSendMessage.mock.calls[0];
+              const actualThreadId = call[0];
+              console.log(
+                "[proof] scene=bare-threadid-after status=info " +
+                "threadId=" + JSON.stringify(actualThreadId)
+              );
+              expect(actualThreadId).toBe("t-direct");
+            });
+          });
+          PROOFEOF
+
+          npx vitest run extensions/zalouser/proof.test.ts --reporter=verbose 2>&1 | tee "$RUNNER_TEMP/proof-after.log"
+          rm -f extensions/zalouser/proof.test.ts
+          echo "[proof] scene=prefix-stripping-after status=pass after=prefix-stripped-correctly"
+
+      - name: Collect proof markers
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== BEFORE PROOF MARKERS ==="
+          grep '\[proof\]' "$RUNNER_TEMP/proof-before.log" || echo "(none)"
+          echo ""
+          echo "=== AFTER PROOF MARKERS ==="
+          grep '\[proof\]' "$RUNNER_TEMP/proof-after.log" || echo "(none)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-zalouser-threadid-prefix
+          path: |
+            ${{ runner.temp }}/proof-before.log
+            ${{ runner.temp }}/proof-after.log
+          retention-days: 30
