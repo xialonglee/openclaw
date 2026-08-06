@@ -80,6 +80,7 @@ export function loadConfigFromContext(
     }
     warnOnConfigMiskeys(validationConfigRaw, deps.logger);
     if (typeof validationConfigRaw !== "object" || validationConfigRaw === null) {
+      deps.logger.warn(`Config at ${configPath} is not a JSON object; using defaults`);
       loggedConfigWarningFingerprints.delete(configPath);
       context.observeLoadConfigSnapshot(
         createConfigFileSnapshot({
