@@ -1,4 +1,4 @@
-name: Proof LM Studio error body credential redaction
+name: Proof LM Studio model-load credential redaction (PR #119970)
 
 on:
   push:
@@ -8,29 +8,26 @@ permissions: {}
 
 jobs:
   proof:
-    name: proof
+    name: before/after real-behavior proof
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       BEFORE_SHA: f5add8197fa990890d3f96142cba1523e9c6c0df
-      AFTER_SHA: 7bfca50e781fa5f90659c6298be1cbf06f400146
+      AFTER_SHA: 9828b8a97bdbca534ecab6dd920a6ff932d2f70c
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
 
     steps:
-      # ── ① Checkout proof branch to get the proof test file ──────────
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: fix/gap-lmstudio-redact-error-body-proof
           path: proof-branch
 
-      # ── ② Setup Node ─────────────────────────────────────────────────
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24.18.0
 
-      # ── ③ Fetch immutable source at BEFORE/AFTER SHAs ────────────────
-      - name: Fetch immutable source
+      - name: Fetch immutable BEFORE/AFTER source
         shell: bash
         run: |
           set -euo pipefail
@@ -42,7 +39,6 @@ jobs:
           git fetch --depth=1 origin "$BEFORE_SHA"
           git fetch --depth=1 origin "$AFTER_SHA"
 
-      # ── ④ BEFORE: install deps, copy proof test, run ─────────────────
       - name: Install dependencies (before)
         shell: bash
         run: |
@@ -53,7 +49,7 @@ jobs:
           corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
           pnpm install --frozen-lockfile
 
-      - name: Prove before fix
+      - name: Prove BEFORE fix (expect credential leak)
         shell: bash
         run: |
           set -euo pipefail
@@ -66,10 +62,13 @@ jobs:
             extensions/lmstudio/src/proof-redact.test.ts \
             2>&1 | tee "$RUNNER_TEMP/proof-before.log"
           echo ""
-          echo "=== Proof markers (before) ==="
-          grep '\[proof\]' "$RUNNER_TEMP/proof-before.log" || echo "WARNING: no proof markers found"
+          echo "=== BEFORE markers ==="
+          grep '\[proof\]' "$RUNNER_TEMP/proof-before.log"
+          echo "=== BEFORE assertions ==="
+          grep -E '\[proof\] scene=long-bearer .*before=leak' "$RUNNER_TEMP/proof-before.log"
+          grep -E '\[proof\] scene=short-key .*before=leak' "$RUNNER_TEMP/proof-before.log"
+          grep -E '\[proof\] scene=custom-header .*before=leak' "$RUNNER_TEMP/proof-before.log"
 
-      # ── ⑤ AFTER: install deps, copy proof test, run ──────────────────
       - name: Install dependencies (after)
         shell: bash
         run: |
@@ -78,28 +77,50 @@ jobs:
           git checkout --detach "$AFTER_SHA"
           pnpm install --frozen-lockfile
 
-      - name: Prove after fix
+      - name: Prove AFTER fix (expect credentials redacted)
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
           cp "$GITHUB_WORKSPACE/proof-branch/extensions/lmstudio/src/proof-redact.test.ts" \
              extensions/lmstudio/src/proof-redact.test.ts
-          echo "=== AFTER proof (expected: credential redacted) ==="
+          echo "=== AFTER proof (expected: credentials redacted) ==="
           PROOF_MODE=after npx vitest run \
             --config test/vitest/vitest.extension-providers.config.ts \
             extensions/lmstudio/src/proof-redact.test.ts \
             2>&1 | tee "$RUNNER_TEMP/proof-after.log"
           echo ""
-          echo "=== Proof markers (after) ==="
-          grep '\[proof\]' "$RUNNER_TEMP/proof-after.log" || echo "WARNING: no proof markers found"
+          echo "=== AFTER markers ==="
+          grep '\[proof\]' "$RUNNER_TEMP/proof-after.log"
+          echo "=== AFTER assertions ==="
+          grep -E '\[proof\] scene=long-bearer .*after=redacted' "$RUNNER_TEMP/proof-after.log"
+          grep -E '\[proof\] scene=short-key .*after=redacted' "$RUNNER_TEMP/proof-after.log"
+          grep -E '\[proof\] scene=custom-header .*after=redacted' "$RUNNER_TEMP/proof-after.log"
+          grep -E '\[proof\] scene=boundary-8k .*full_leaked=false' "$RUNNER_TEMP/proof-after.log"
 
-      # ── ⑥ Upload artifacts ───────────────────────────────────────────
+      - name: Collect proof summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/proof-logs"
+          cp "$RUNNER_TEMP/proof-before.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/proof-after.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          {
+            echo "BEFORE_SHA=$BEFORE_SHA"
+            echo "AFTER_SHA=$AFTER_SHA"
+            echo ""
+            echo "=== BEFORE markers ==="
+            grep '\[proof\]' "$RUNNER_TEMP/proof-before.log" 2>/dev/null || true
+            echo ""
+            echo "=== AFTER markers ==="
+            grep '\[proof\]' "$RUNNER_TEMP/proof-after.log" 2>/dev/null || true
+          } > "$RUNNER_TEMP/proof-logs/summary.log"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: proof-lmstudio-redact-error-body
           path: |
-            ${{ runner.temp }}/proof-before.log
-            ${{ runner.temp }}/proof-after.log
+            ${{ runner.temp }}/proof-logs/
           retention-days: 30
