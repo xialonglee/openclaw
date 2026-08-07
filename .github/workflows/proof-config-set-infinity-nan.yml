@@ -1,0 +1,225 @@
+name: Proof reject Infinity/NaN in config set/batch/patch
+
+on:
+  push:
+    branches: [fix/gap-config-set-infinity-nan-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BEFORE_SHA: 9aa24e8f2e822290a4c4f785d48031f93c3f9fbb
+      AFTER_SHA: 5809c4cdee524fc205c3941ad7827b82a1d0f695
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      PROOF_PATH: models.providers.openai.params.timeout
+      BATCH_JSON: '[{"path":"models.providers.openai.params.timeout","value":1e999}]'
+
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source (before and after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suffix in before after; do
+            dir="$RUNNER_TEMP/proof-source-$suffix"
+            rm -rf "$dir"
+            mkdir -p "$dir"
+            cd "$dir"
+            git init
+            git remote add origin https://github.com/openclaw/openclaw.git
+          done
+          cd "$RUNNER_TEMP/proof-source-before"
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git checkout --detach "$BEFORE_SHA"
+          cd "$RUNNER_TEMP/proof-source-after"
+          git fetch --depth=1 origin "$AFTER_SHA"
+          git checkout --detach "$AFTER_SHA"
+
+      - name: Install dependencies and build CLI startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          for suffix in before after; do
+            dir="$RUNNER_TEMP/proof-source-$suffix"
+            cd "$dir"
+            corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+            pnpm install --frozen-lockfile
+            node scripts/build-all.mjs cliStartup
+          done
+
+      - name: Prove before fix (corruption reproduced)
+        shell: bash
+        run: |
+          set -euo pipefail
+          src_dir="$RUNNER_TEMP/proof-source-before"
+          cd "$src_dir"
+
+          proof_root="$RUNNER_TEMP/proof/before"
+          rm -rf "$proof_root"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/openclaw.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+
+          log="$src_dir/proof.log"
+          : > "$log"
+          marker() { echo "[proof] $*" >> "$log"; }
+
+          read_value() {
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+              const obj = data.models?.providers?.openai?.params ?? {}; console.log(Object.hasOwn(obj, 'timeout') ? String(obj.timeout) : 'MISSING');
+            " "$OPENCLAW_CONFIG_PATH" 2>/dev/null || echo "JSON_ERROR"
+          }
+
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          set +e
+          node openclaw.mjs config set "$PROOF_PATH" 1e999 >>"$log" 2>&1
+          code=$?
+          set -e
+          value=$(read_value)
+          marker "scene=config-set-scalar before exit=$code stored_value=$value"
+          if [ "$code" -eq 0 ] && [ "$value" = "null" ]; then
+            marker "scene=config-set-scalar before corruption=confirmed"
+          else
+            marker "scene=config-set-scalar before corruption=unexpected"
+          fi
+
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          set +e
+          node openclaw.mjs config set --batch-json "$BATCH_JSON" >>"$log" 2>&1
+          code=$?
+          set -e
+          value=$(read_value)
+          marker "scene=config-set-batch before exit=$code stored_value=$value"
+          if [ "$code" -eq 0 ] && [ "$value" = "null" ]; then
+            marker "scene=config-set-batch before corruption=confirmed"
+          else
+            marker "scene=config-set-batch before corruption=unexpected"
+          fi
+
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          patch_file="$proof_root/patch.json5"
+          printf '{ "models": { "providers": { "openai": { "params": { "timeout": 1e999 } } } } }' > "$patch_file"
+          set +e
+          node openclaw.mjs config patch --file "$patch_file" >>"$log" 2>&1
+          code=$?
+          set -e
+          value=$(read_value)
+          marker "scene=config-patch before exit=$code stored_value=$value"
+          if [ "$code" -eq 0 ] && [ "$value" = "null" ]; then
+            marker "scene=config-patch before corruption=confirmed"
+          else
+            marker "scene=config-patch before corruption=unexpected"
+          fi
+
+          echo "--- BEFORE PROOF LOG ---"
+          cat "$log"
+
+      - name: Prove after fix (rejection verified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          src_dir="$RUNNER_TEMP/proof-source-after"
+          cd "$src_dir"
+
+          proof_root="$RUNNER_TEMP/proof/after"
+          rm -rf "$proof_root"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/openclaw.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+
+          log="$src_dir/proof.log"
+          : > "$log"
+          marker() { echo "[proof] $*" >> "$log"; }
+
+          read_value() {
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+              const obj = data.models?.providers?.openai?.params ?? {}; console.log(Object.hasOwn(obj, 'timeout') ? String(obj.timeout) : 'MISSING');
+            " "$OPENCLAW_CONFIG_PATH" 2>/dev/null || echo "JSON_ERROR"
+          }
+
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          set +e
+          node openclaw.mjs config set "$PROOF_PATH" 1e999 >>"$log" 2>&1
+          code=$?
+          set -e
+          value=$(read_value)
+          status=$([ "$code" -ne 0 ] && echo "rejected" || echo "accepted")
+          marker "scene=config-set-scalar after exit=$code stored_value=$value status=$status"
+
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          set +e
+          node openclaw.mjs config set --batch-json "$BATCH_JSON" >>"$log" 2>&1
+          code=$?
+          set -e
+          value=$(read_value)
+          status=$([ "$code" -ne 0 ] && echo "rejected" || echo "accepted")
+          marker "scene=config-set-batch after exit=$code stored_value=$value status=$status"
+
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          patch_file="$proof_root/patch.json5"
+          printf '{ "models": { "providers": { "openai": { "params": { "timeout": 1e999 } } } } }' > "$patch_file"
+          set +e
+          node openclaw.mjs config patch --file "$patch_file" >>"$log" 2>&1
+          code=$?
+          set -e
+          value=$(read_value)
+          status=$([ "$code" -ne 0 ] && echo "rejected" || echo "accepted")
+          marker "scene=config-patch after exit=$code stored_value=$value status=$status"
+
+          if grep -q "Value must be a finite number" "$log"; then
+            marker "scene=error-message after status=found"
+          else
+            marker "scene=error-message after status=missing"
+          fi
+
+          echo "--- AFTER PROOF LOG ---"
+          cat "$log"
+
+      - name: Verify marker expectations
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_log="$RUNNER_TEMP/proof-source-before/proof.log"
+          after_log="$RUNNER_TEMP/proof-source-after/proof.log"
+
+          echo "Checking before markers..."
+          grep -E 'scene=config-set-scalar before corruption=confirmed' "$before_log"
+          grep -E 'scene=config-set-batch before corruption=confirmed' "$before_log"
+          grep -E 'scene=config-patch before corruption=confirmed' "$before_log"
+
+          echo "Checking after markers..."
+          grep -E 'scene=config-set-scalar after .*status=rejected' "$after_log"
+          grep -E 'scene=config-set-batch after .*status=rejected' "$after_log"
+          grep -E 'scene=config-patch after .*status=rejected' "$after_log"
+          grep -E 'scene=error-message after status=found' "$after_log"
+
+      - name: Merge logs for artifact
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/proof-source"
+          cat "$RUNNER_TEMP/proof-source-before/proof.log" "$RUNNER_TEMP/proof-source-after/proof.log" > "$RUNNER_TEMP/proof-source/proof.log"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-config-set-infinity-nan
+          path: ${{ runner.temp }}/proof-source/proof.log
+          retention-days: 30
