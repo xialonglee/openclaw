@@ -1,0 +1,112 @@
+name: Proof nextcloud-talk redact error body
+
+on:
+  push:
+    branches: [fix/gap-nextcloud-talk-redact-error-body-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: f5add8197fa990890d3f96142cba1523e9c6c0df
+      AFTER_SHA: 00567ba144f88658b3bf44592eb213c6c59f35de
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: fix/gap-nextcloud-talk-redact-error-body-proof
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      # ── Fetch immutable source at both SHAs ─────────────────────
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      # ── BEFORE: install deps at main SHAs ───────────────────────
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      # Copy proof test file into the before checkout
+      - name: Copy proof test (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_WORKSPACE/extensions/nextcloud-talk/src/redact-error-body.proof.test.ts" \
+             "$RUNNER_TEMP/proof-source/extensions/nextcloud-talk/src/redact-error-body.proof.test.ts"
+
+      # ── BEFORE: run proof (expected to FAIL — gap exists) ──────
+      - name: Prove before fix (expect failures)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          echo "=== BEFORE_SHA=$BEFORE_SHA (main, no redaction) ==="
+          echo "Tests should FAIL — raw secrets visible in error messages."
+          node scripts/run-vitest.mjs \
+            extensions/nextcloud-talk/src/redact-error-body.proof.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/proof-before.log" || true
+          echo "[proof] phase=before sha=$BEFORE_SHA status=completed"
+
+      # ── AFTER: install deps at PR head SHA ─────────────────────
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+
+      # Copy proof test file into the after checkout
+      - name: Copy proof test (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_WORKSPACE/extensions/nextcloud-talk/src/redact-error-body.proof.test.ts" \
+             "$RUNNER_TEMP/proof-source/extensions/nextcloud-talk/src/redact-error-body.proof.test.ts"
+
+      # ── AFTER: run proof (must PASS — fix active) ──────────────
+      - name: Prove after fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          echo "=== AFTER_SHA=$AFTER_SHA (PR head, with redaction) ==="
+          echo "Tests must PASS — secrets redacted."
+          node scripts/run-vitest.mjs \
+            extensions/nextcloud-talk/src/redact-error-body.proof.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/proof-after.log"
+          echo "[proof] phase=after sha=$AFTER_SHA status=completed"
+
+      # ── Upload artifacts ───────────────────────────────────────
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-nextcloud-talk-redact-error-body
+          path: |
+            ${{ runner.temp }}/proof-before.log
+            ${{ runner.temp }}/proof-after.log
+          retention-days: 30
