@@ -155,7 +155,9 @@ describe("proof: LM Studio error body credential redaction (real HTTP)", () => {
     // Build a body larger than 8 KiB where the credential starts just before
     // the byte limit, so truncation splits it. The prefix read for the error
     // message then contains a credential fragment instead of the whole value.
-    const prefixLen = 8192 - 4; // leave 4 bytes of the secret inside the limit
+    // The reflected string is "reflected Bearer <secret>" (17 bytes before the
+    // secret value), so the secret itself starts at byte prefixLen + 17.
+    const prefixLen = 8160; // secret starts at byte 8177 and crosses the 8192 limit
     const { url, server } = await startServer((req, res) => {
       if (req.url?.startsWith("/api/v1/models") && req.method !== "POST") {
         res.writeHead(200, { "Content-Type": "application/json" });
