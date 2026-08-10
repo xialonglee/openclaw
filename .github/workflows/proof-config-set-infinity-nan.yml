@@ -201,7 +201,7 @@ jobs:
             --provider-allow-symlink-command >>"$log" 2>&1
           symlink_code=$?
           set -e
-          if [ "$insecure_code" -ne 0 ] && grep -q "unknown option" "$log"; then
+          if [ "$insecure_code" -ne 0 ] && grep -qE "unknown option|not recognize option" "$log"; then
             marker "scene=provider-retired-options after status=rejected insecure=$insecure_code symlink=$symlink_code"
           else
             marker "scene=provider-retired-options after status=accepted-or-missing insecure=$insecure_code symlink=$symlink_code"
