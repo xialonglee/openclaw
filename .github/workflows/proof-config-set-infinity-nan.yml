@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 60
     env:
       BEFORE_SHA: 9aa24e8f2e822290a4c4f785d48031f93c3f9fbb
-      AFTER_SHA: 5809c4cdee524fc205c3941ad7827b82a1d0f695
+      AFTER_SHA: 538724c8485815272549e94eec515bbbfa8f9166
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -188,6 +188,25 @@ jobs:
             marker "scene=error-message after status=missing"
           fi
 
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          set +e
+          node openclaw.mjs config set "secrets.providers.vaultfile" \
+            --provider-source file --provider-path /tmp/vault.json \
+            --provider-allow-insecure-path >>"$log" 2>&1
+          insecure_code=$?
+          set -e
+          set +e
+          node openclaw.mjs config set "secrets.providers.vaultfile" \
+            --provider-source file --provider-path /tmp/vault.json \
+            --provider-allow-symlink-command >>"$log" 2>&1
+          symlink_code=$?
+          set -e
+          if [ "$insecure_code" -ne 0 ] && grep -q "unknown option" "$log"; then
+            marker "scene=provider-retired-options after status=rejected insecure=$insecure_code symlink=$symlink_code"
+          else
+            marker "scene=provider-retired-options after status=accepted-or-missing insecure=$insecure_code symlink=$symlink_code"
+          fi
+
           echo "--- AFTER PROOF LOG ---"
           cat "$log"
 
@@ -208,6 +227,7 @@ jobs:
           grep -E 'scene=config-set-batch after .*status=rejected' "$after_log"
           grep -E 'scene=config-patch after .*status=rejected' "$after_log"
           grep -E 'scene=error-message after status=found' "$after_log"
+          grep -E 'scene=provider-retired-options after status=rejected' "$after_log"
 
       - name: Merge logs for artifact
         if: always()
