@@ -1,0 +1,188 @@
+# Proof-only workflow for PR openclaw/openclaw#123098 (Discord audio-transcript
+# untrusted framing). Runs only on the proof branch; secretless by design.
+name: Proof PR 123098 Discord audio-transcript boundary
+
+on:
+  push:
+    branches: [fix/gap-discord-transcript-untrusted-proof]
+
+permissions: {}
+
+env:
+  BEFORE_SHA: 2f337adb8e75cd8b1e7e3ee0f3697eec519b70d2
+  AFTER_SHA: ab19baaf25bb2ec5f411fe980d3e08d869a6c011
+  CI: "true"
+  OPENCLAW_SKIP_UPDATE_CHECK: "1"
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+
+      # ① Fetch the proof branch (carries the proof test file) and both
+      # immutable upstream SHAs. Pure git CLI: no actions/checkout, no token.
+      - name: Fetch immutable sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch_dir="$RUNNER_TEMP/proof-branch"
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$branch_dir" "$source_dir"
+          cd "$branch_dir"
+          git init -q
+          git remote add origin https://github.com/xialonglee/openclaw.git
+          git fetch -q --depth=1 origin fix/gap-discord-transcript-untrusted-proof
+          git checkout -q FETCH_HEAD
+          cd "$source_dir"
+          git init -q
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch -q --depth=1 origin "$BEFORE_SHA"
+          git fetch -q --depth=1 origin "$AFTER_SHA"
+
+      # ② Install deps at BEFORE_SHA (shipped main).
+      - name: Install deps (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout -q --detach "$BEFORE_SHA"
+          corepack enable
+          pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      # ③ Prove the shipped raw behavior at BEFORE_SHA (expect PASS).
+      - name: Prove before fix (raw expectation)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          cp "$RUNNER_TEMP/proof-branch/extensions/discord/src/monitor/message-handler.process.audio-transcript-proof.test.ts" \
+            "$source_dir/extensions/discord/src/monitor/"
+          cd "$source_dir"
+          mkdir -p "$RUNNER_TEMP/proof/before"
+          export PROOF_EXPECT_FRAMED=0
+          export PROOF_HEAD_SHA="$BEFORE_SHA"
+          export PROOF_VERDICT_PATH="$RUNNER_TEMP/proof/before/verdict.json"
+          node scripts/run-vitest.mjs extensions/discord/src/monitor/message-handler.process.audio-transcript-proof.test.ts 2>&1 | tee "$RUNNER_TEMP/proof/before/run.log"
+
+      # ④ Install deps at AFTER_SHA (PR head).
+      - name: Install deps (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout -q --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+
+      # ⑤ Prove the fixed framed behavior at AFTER_SHA (expect PASS).
+      - name: Prove after fix (framed expectation)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          cp "$RUNNER_TEMP/proof-branch/extensions/discord/src/monitor/message-handler.process.audio-transcript-proof.test.ts" \
+            "$source_dir/extensions/discord/src/monitor/"
+          cd "$source_dir"
+          mkdir -p "$RUNNER_TEMP/proof/after"
+          export PROOF_EXPECT_FRAMED=1
+          export PROOF_HEAD_SHA="$AFTER_SHA"
+          export PROOF_VERDICT_PATH="$RUNNER_TEMP/proof/after/verdict.json"
+          node scripts/run-vitest.mjs extensions/discord/src/monitor/message-handler.process.audio-transcript-proof.test.ts 2>&1 | tee "$RUNNER_TEMP/proof/after/run.log"
+
+      # ⑥ Delta check: the raw expectation must FAIL at the after head,
+      # proving the behavior actually changed between the two SHAs.
+      - name: Prove delta (raw expectation fails at after head)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          cd "$source_dir"
+          mkdir -p "$RUNNER_TEMP/proof/delta"
+          export PROOF_EXPECT_FRAMED=0
+          export PROOF_HEAD_SHA="$AFTER_SHA"
+          export PROOF_VERDICT_PATH="$RUNNER_TEMP/proof/delta/verdict.json"
+          set +e
+          node scripts/run-vitest.mjs extensions/discord/src/monitor/message-handler.process.audio-transcript-proof.test.ts > "$RUNNER_TEMP/proof/delta/run.log" 2>&1
+          delta_exit=$?
+          set -e
+          DELTA_VERDICT="$RUNNER_TEMP/proof/delta/verdict.json" node - <<'NODE'
+          const fs = require("fs");
+          const v = JSON.parse(fs.readFileSync(process.env.DELTA_VERDICT, "utf8"));
+          if (v.outcome !== "fail") {
+            console.error("[proof] delta verdict outcome is not fail");
+            process.exit(1);
+          }
+          for (const name of ["voice-benign", "spoken-command-injection"]) {
+            const s = v.scenarios.find((x) => x.name === name);
+            if (!s) { console.error(`[proof] delta missing scenario ${name}`); process.exit(1); }
+            const body = String(s.observed?.BodyForAgent ?? "");
+            if (!body.startsWith("[Audio transcript (machine-generated, untrusted)]:")) {
+              console.error(`[proof] delta scenario ${name} did not observe framed BodyForAgent`);
+              process.exit(1);
+            }
+            if (String(s.observed?.CommandBody ?? "") !== "") {
+              console.error(`[proof] delta scenario ${name} observed non-empty CommandBody`);
+              process.exit(1);
+            }
+          }
+          console.log("[proof] delta verified: raw expectations fail at after head, framed fields observed");
+          NODE
+          if [ "$delta_exit" -eq 0 ]; then
+            echo "[proof] delta UNEXPECTED-PASS"
+            exit 1
+          fi
+          echo "[proof] delta expected-fail exit=$delta_exit"
+
+      # ⑦ Gate: before=raw-vulnerable PASS, after=framed-fixed PASS,
+      # delta=behavior-changed FAIL. All three must hold.
+      - name: Proof gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BEFORE_VERDICT="$RUNNER_TEMP/proof/before/verdict.json" \
+          AFTER_VERDICT="$RUNNER_TEMP/proof/after/verdict.json" \
+          DELTA_VERDICT="$RUNNER_TEMP/proof/delta/verdict.json" \
+          node - <<'NODE'
+          const fs = require("fs");
+          const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+          const before = read(process.env.BEFORE_VERDICT);
+          const after = read(process.env.AFTER_VERDICT);
+          const delta = read(process.env.DELTA_VERDICT);
+          const fails = [];
+          if (before.expectFramed !== false || before.outcome !== "pass") fails.push("before-raw-pass");
+          if (after.expectFramed !== true || after.outcome !== "pass") fails.push("after-framed-pass");
+          if (delta.outcome !== "fail") fails.push("delta-fail");
+          const beforeInject = before.scenarios.find((s) => s.name === "spoken-command-injection");
+          if (!beforeInject || !String(beforeInject.observed?.CommandBody ?? "").includes("/shutdown")) {
+            fails.push("before-command-injection-observed");
+          }
+          const afterBenign = after.scenarios.find((s) => s.name === "voice-benign");
+          if (!afterBenign) {
+            fails.push("after-scenario-missing");
+          } else {
+            if (!String(afterBenign.observed?.BodyForAgent ?? "").startsWith("[Audio transcript (machine-generated, untrusted)]:")) fails.push("after-framed-body");
+            if (String(afterBenign.observed?.RawBody ?? "") !== "") fails.push("after-raw-body-empty");
+            if (String(afterBenign.observed?.CommandBody ?? "") !== "") fails.push("after-command-body-empty");
+            if (String(afterBenign.observed?.CommandTurnBody ?? "") !== "") fails.push("after-command-turn-empty");
+            if (String(afterBenign.observed?.Transcript ?? "") !== "hello from discord voice") fails.push("after-transcript-preserved");
+            if (afterBenign.observed?.media?.[0]?.transcribed !== true) fails.push("after-media-transcribed");
+          }
+          if (fails.length > 0) {
+            console.error(`[proof] GATE FAILED: ${fails.join(", ")}`);
+            process.exit(1);
+          }
+          console.log("[proof] GATE PASSED: before=raw-vulnerable after=framed-fixed delta=behavior-changed");
+          NODE
+          grep -h "\[proof\]" "$RUNNER_TEMP"/proof/before/run.log "$RUNNER_TEMP"/proof/after/run.log "$RUNNER_TEMP"/proof/delta/run.log | sort -u || true
+
+      # ⑧ Publish verdicts + logs as proof artifacts.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-123098-discord-audio-transcript
+          path: ${{ runner.temp }}/proof
+          retention-days: 30
