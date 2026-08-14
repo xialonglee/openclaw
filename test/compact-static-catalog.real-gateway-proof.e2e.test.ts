@@ -5,16 +5,18 @@
 // boundary with no prepared-model-runtime test harness.
 //
 // Run against the same immutable source at BEFORE_SHA and AFTER_SHA with
-// PROOF_MODE=before|after. The static-vs-live catalog-mode observable is identical
-// across both heads (the option already existed); the before/after caller-boundary
-// difference is covered by the PR's call-shape tests. Markers are machine-readable.
+// PROOF_MODE=before|after. The compact-direct and image-fallback scenes spy
+// (call-through) on acquireAgentRunPreparedModelRuntime so the caller's exact
+// catalogMode argument is recorded at each head: the changed callers pass
+// catalogMode "static" only at AFTER_SHA. Markers are machine-readable.
 import fs from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { compactEmbeddedAgentSessionDirect } from "../src/agents/embedded-agent-runner/compact.js";
 import { isPreparedModelCatalogFull } from "../src/agents/prepared-model-runtime.facts.js";
-import { acquireAgentRunPreparedModelRuntime } from "../src/agents/prepared-model-runtime.js";
+import * as preparedRuntime from "../src/agents/prepared-model-runtime.js";
 import { clearConfigCache, clearRuntimeConfigSnapshot } from "../src/config/config.js";
 import { clearSessionStoreCacheForTest } from "../src/config/sessions/store-writer-state.js";
 import {
@@ -22,6 +24,7 @@ import {
   startGatewayWithClient,
 } from "../src/gateway/test-helpers.e2e.js";
 import { buildMockOpenAiResponsesProvider } from "../src/gateway/test-openai-responses-model.js";
+import { resolveImageRuntime } from "../src/media-understanding/image-model-runtime.js";
 import { captureEnv, setTestEnvValue } from "../src/test-utils/env.js";
 
 const PROOF_MODE = process.env.PROOF_MODE?.trim() || "before";
@@ -43,6 +46,38 @@ const envKeys = [
 
 function emitMarker(marker: string): void {
   console.log(`[proof] ${marker}`);
+}
+
+type CapturedAcquisition = {
+  catalogMode: string | undefined;
+  fullCatalog: boolean | undefined;
+};
+
+/**
+ * Call-through spy on the prepared-runtime acquisition boundary. Records the
+ * catalogMode argument each caller passes and whether the acquired snapshot is a
+ * full catalog, while the real production function still runs.
+ */
+function installAcquisitionSpy(): {
+  spy: ReturnType<typeof vi.spyOn>;
+  captured: CapturedAcquisition[];
+} {
+  const captured: CapturedAcquisition[] = [];
+  const original = preparedRuntime.acquireAgentRunPreparedModelRuntime;
+  const spy = vi.spyOn(preparedRuntime, "acquireAgentRunPreparedModelRuntime");
+  spy.mockImplementation(async (...args: Parameters<typeof original>) => {
+    const lease = await original(...args);
+    captured.push({
+      catalogMode: args[1]?.catalogMode,
+      fullCatalog: isPreparedModelCatalogFull(lease.snapshot.modelCatalog),
+    });
+    return lease;
+  });
+  return { spy, captured };
+}
+
+function summarizeCatalogModes(captures: readonly CapturedAcquisition[]): string {
+  return captures.map((entry) => entry.catalogMode ?? "none").join(",") || "no-calls";
 }
 
 function buildResponsesSse(text: string): string {
@@ -145,25 +180,37 @@ describe("proof: real gateway compaction/media static catalog", () => {
         const provider = buildMockOpenAiResponsesProvider(
           `http://127.0.0.1:${providerAddress.port}/v1`,
         );
+        // Make the configured model image-capable so the image fallback scene can
+        // resolve it through the committed Gateway owner.
+        const imageCapableConfig = {
+          ...provider.config,
+          models: [
+            { ...provider.config.models[0], input: ["text", "image"] },
+          ] as typeof provider.config.models,
+        };
+        const imageProvider = { ...provider, config: imageCapableConfig };
         const cfg = {
           agents: {
             defaults: {
               workspace: workspaceDir,
               skipBootstrap: true,
-              model: { primary: provider.modelRef },
+              model: { primary: imageProvider.modelRef },
               models: {
-                [provider.modelRef]: { params: { transport: "sse", openaiWsWarmup: false } },
+                [imageProvider.modelRef]: { params: { transport: "sse", openaiWsWarmup: false } },
               },
             },
             entries: { main: { default: true } },
           },
-          models: { mode: "replace", providers: { [provider.providerId]: provider.config } },
+          models: {
+            mode: "replace",
+            providers: { [imageProvider.providerId]: imageProvider.config },
+          },
           gateway: { auth: { mode: "token", token: "compact-static-proof-token" } },
         };
 
         // Scene 1 (control): before the Gateway lifecycle forces static mode, the
         // default live acquisition still builds the full catalog in the real process.
-        const liveLease = await acquireAgentRunPreparedModelRuntime({
+        const liveLease = await preparedRuntime.acquireAgentRunPreparedModelRuntime({
           agentDir: path.join(tempHome, "proof-live-agent"),
           workspaceDir,
           config: cfg,
@@ -212,7 +259,7 @@ describe("proof: real gateway compaction/media static catalog", () => {
 
         // Scene 3: the static acquisition used by compaction/media fallback resolves
         // the configured model and skips the full catalog build.
-        const staticLease = await acquireAgentRunPreparedModelRuntime(
+        const staticLease = await preparedRuntime.acquireAgentRunPreparedModelRuntime(
           {
             agentId: "main",
             agentDir: path.join(stateDir, "agents", "main"),
@@ -227,7 +274,8 @@ describe("proof: real gateway compaction/media static catalog", () => {
           const snapshot = staticLease.snapshot;
           staticFullCatalog = isPreparedModelCatalogFull(snapshot.modelCatalog);
           staticConfiguredResolved = (snapshot.inlineProviderModels ?? []).some(
-            (entry) => entry.provider === provider.providerId && entry.id === provider.modelId,
+            (entry) =>
+              entry.provider === imageProvider.providerId && entry.id === imageProvider.modelId,
           );
         } finally {
           staticLease.release();
@@ -238,6 +286,71 @@ describe("proof: real gateway compaction/media static catalog", () => {
         );
         expect(staticConfiguredResolved).toBe(true);
         expect(staticFullCatalog).toBe(false);
+
+        // Scene 4: direct compaction through the changed production boundary. The
+        // session from Scene 2 exists, so the compaction caller resolves it and then
+        // acquires its prepared runtime; the spy records the exact catalogMode the
+        // caller passes at this head.
+        const { spy: compactSpy, captured: compactCaptures } = installAcquisitionSpy();
+        let compactResult: { ok?: boolean; compacted?: boolean; reason?: string } | undefined;
+        try {
+          compactResult = await compactEmbeddedAgentSessionDirect({
+            sessionKey,
+            sessionId: "",
+            agentId: "main",
+            agentDir: path.join(stateDir, "agents", "main"),
+            workspaceDir,
+            config: cfg,
+            trigger: "manual",
+            provider: imageProvider.providerId,
+            model: imageProvider.modelId,
+          });
+        } finally {
+          compactSpy.mockRestore();
+        }
+        const compactStaticCall = compactCaptures.find((entry) => entry.catalogMode === "static");
+        const compactPass =
+          PROOF_MODE === "after"
+            ? compactStaticCall !== undefined && compactStaticCall.fullCatalog === false
+            : compactCaptures.length > 0 &&
+              !compactCaptures.some((entry) => entry.catalogMode === "static");
+        emitMarker(
+          `scene=compact-direct mode=${PROOF_MODE} status=${compactPass ? "pass" : "fail"} catalog_modes=${summarizeCatalogModes(compactCaptures)} static_full_catalog=${compactStaticCall?.fullCatalog ?? "n/a"} compact_ok=${compactResult?.ok ?? "n/a"} compacted=${compactResult?.compacted ?? "n/a"} reason=${compactResult?.reason ?? "none"}`,
+        );
+        expect(compactPass).toBe(true);
+
+        // Scene 5: image fallback through the changed production boundary. The
+        // configured mock model is image-capable, so resolveImageRuntime runs through
+        // its prepared-runtime acquisition and model resolution with the real Gateway.
+        const { spy: imageSpy, captured: imageCaptures } = installAcquisitionSpy();
+        let imageResolved = false;
+        let imageError: string | undefined;
+        try {
+          const resolvedImage = await resolveImageRuntime({
+            cfg,
+            agentDir: path.join(stateDir, "agents", "main"),
+            agentId: "main",
+            workspaceDir,
+            provider: imageProvider.providerId,
+            model: imageProvider.modelId,
+          });
+          imageResolved = resolvedImage.model !== undefined;
+          resolvedImage.release?.();
+        } catch (error) {
+          imageError = String(error);
+        } finally {
+          imageSpy.mockRestore();
+        }
+        const imageStaticCall = imageCaptures.find((entry) => entry.catalogMode === "static");
+        const imagePass =
+          PROOF_MODE === "after"
+            ? imageStaticCall !== undefined && imageStaticCall.fullCatalog === false
+            : imageCaptures.length > 0 &&
+              !imageCaptures.some((entry) => entry.catalogMode === "static");
+        emitMarker(
+          `scene=image-fallback mode=${PROOF_MODE} status=${imagePass ? "pass" : "fail"} catalog_modes=${summarizeCatalogModes(imageCaptures)} static_full_catalog=${imageStaticCall?.fullCatalog ?? "n/a"} resolved=${imageResolved} error=${imageError ?? "none"}`,
+        );
+        expect(imagePass).toBe(true);
       } finally {
         envSnapshot.restore();
       }

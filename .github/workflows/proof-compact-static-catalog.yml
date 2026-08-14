@@ -75,6 +75,10 @@ jobs:
             | grep -F 'status=pass' | grep -F 'run_wait=ok'
           grep -F '[proof] scene=static-acquire mode=before' "$RUNNER_TEMP/proof-before.log" \
             | grep -F 'status=pass' | grep -F 'configured_resolved=true' | grep -F 'full_catalog=false'
+          grep -F '[proof] scene=compact-direct mode=before' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass'
+          grep -F '[proof] scene=image-fallback mode=before' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass'
 
       # ④ Install dependencies at AFTER_SHA.
       - name: Install dependencies (after)
@@ -107,6 +111,10 @@ jobs:
             | grep -F 'status=pass' | grep -F 'run_wait=ok'
           grep -F '[proof] scene=static-acquire mode=after' "$RUNNER_TEMP/proof-after.log" \
             | grep -F 'status=pass' | grep -F 'configured_resolved=true' | grep -F 'full_catalog=false'
+          grep -F '[proof] scene=compact-direct mode=after' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -F 'catalog_modes=static' | grep -F 'static_full_catalog=false'
+          grep -F '[proof] scene=image-fallback mode=after' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -F 'catalog_modes=static' | grep -F 'static_full_catalog=false'
 
       # ⑥ Collect the proof summary and upload it as the evidence artifact.
       - name: Collect proof summary
