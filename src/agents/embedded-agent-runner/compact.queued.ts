@@ -335,24 +335,31 @@ async function compactEmbeddedAgentSessionImpl(
         ? normalizeOptionalAgentRuntimeId(params.agentHarnessId)
         : undefined,
   });
-  const lease = await acquireAgentRunPreparedModelRuntime({
-    config: params.config ?? {},
-    agentId: agentIds.sessionAgentId,
-    agentDir,
-    inheritedAuthDir: resolveDefaultAgentDir(params.config ?? {}),
-    workspaceDir: resolvedWorkspaceDir,
-    ...(params.allowGatewaySubagentBinding ? { allowGatewaySubagentBinding: true } : {}),
-    runtimePluginSelections: [
-      {
-        provider: runtimeSelection.provider,
-        modelId: runtimeSelection.modelId,
-        ...(runtimeSelection.selectedHarnessRuntime
-          ? { runtime: runtimeSelection.selectedHarnessRuntime }
-          : {}),
-        agentId: agentIds.sessionAgentId,
-      },
-    ],
-  });
+  const lease = await acquireAgentRunPreparedModelRuntime(
+    {
+      config: params.config ?? {},
+      agentId: agentIds.sessionAgentId,
+      agentDir,
+      inheritedAuthDir: resolveDefaultAgentDir(params.config ?? {}),
+      workspaceDir: resolvedWorkspaceDir,
+      ...(params.allowGatewaySubagentBinding ? { allowGatewaySubagentBinding: true } : {}),
+      runtimePluginSelections: [
+        {
+          provider: runtimeSelection.provider,
+          modelId: runtimeSelection.modelId,
+          ...(runtimeSelection.selectedHarnessRuntime
+            ? { runtime: runtimeSelection.selectedHarnessRuntime }
+            : {}),
+          agentId: agentIds.sessionAgentId,
+        },
+      ],
+    },
+    {
+      // Compaction needs only configured admission facts. Full live model inventory remains
+      // available through the snapshot's lazy control-plane loader.
+      catalogMode: "static",
+    },
+  );
   const run = async () => {
     ensureContextEnginesInitialized();
     const contextEngine = await resolveContextEngine(params.config, {

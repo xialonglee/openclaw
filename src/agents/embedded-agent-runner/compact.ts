@@ -207,16 +207,23 @@ export async function compactEmbeddedAgentSessionDirect(
             },
       ),
   ];
-  const preparedModelRuntimeLease = await acquireAgentRunPreparedModelRuntime({
-    config: requestedParams.config ?? {},
-    agentId: requestedAgentIds.sessionAgentId,
-    agentDir: requestedAgentDir,
-    inheritedAuthDir: resolveDefaultAgentDir(requestedParams.config ?? {}),
-    workspaceDir: requestedWorkspaceDir,
-    preserveWorkspaceDirOnRefresh: requestedWorkspaceDir !== canonicalWorkspaceDir,
-    ...(requestedParams.allowGatewaySubagentBinding ? { allowGatewaySubagentBinding: true } : {}),
-    runtimePluginSelections,
-  });
+  const preparedModelRuntimeLease = await acquireAgentRunPreparedModelRuntime(
+    {
+      config: requestedParams.config ?? {},
+      agentId: requestedAgentIds.sessionAgentId,
+      agentDir: requestedAgentDir,
+      inheritedAuthDir: resolveDefaultAgentDir(requestedParams.config ?? {}),
+      workspaceDir: requestedWorkspaceDir,
+      preserveWorkspaceDirOnRefresh: requestedWorkspaceDir !== canonicalWorkspaceDir,
+      ...(requestedParams.allowGatewaySubagentBinding ? { allowGatewaySubagentBinding: true } : {}),
+      runtimePluginSelections,
+    },
+    {
+      // Compaction needs only configured admission facts. Full live model inventory remains
+      // available through the snapshot's lazy control-plane loader.
+      catalogMode: "static",
+    },
+  );
   try {
     const preparedModelRuntimeOwnerSnapshot = preparedModelRuntimeLease.snapshot;
     const preparedWorkspaceDir =

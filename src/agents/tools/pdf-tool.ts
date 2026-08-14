@@ -171,13 +171,20 @@ async function runPdfPrompt(params: {
   if (params.preparedModelRuntime) {
     preparedRuntimeLease = { snapshot: params.preparedModelRuntime, release: () => {} };
   } else {
-    const acquireRuntime = acquireAgentRunPreparedModelRuntime({
-      agentDir: params.agentDir,
-      ...(params.agentId ? { agentId: params.agentId } : {}),
-      config: requestedCfg ?? {},
-      inheritedAuthDir: resolveDefaultAgentDir(requestedCfg ?? {}),
-      ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
-    });
+    const acquireRuntime = acquireAgentRunPreparedModelRuntime(
+      {
+        agentDir: params.agentDir,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        config: requestedCfg ?? {},
+        inheritedAuthDir: resolveDefaultAgentDir(requestedCfg ?? {}),
+        ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
+      },
+      {
+        // PDF prompts resolve only the configured model projection; full catalog discovery stays
+        // behind the snapshot's lazy control-plane loader.
+        catalogMode: "static",
+      },
+    );
     try {
       preparedRuntimeLease = params.signal
         ? await abortable(params.signal, acquireRuntime)

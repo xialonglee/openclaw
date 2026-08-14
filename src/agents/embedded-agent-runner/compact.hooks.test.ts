@@ -671,6 +671,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
 
     expect(acquireAgentRunPreparedModelRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({ config: {}, workspaceDir: "/tmp/workspace" }),
+      { catalogMode: "static" },
     );
   });
 
@@ -698,6 +699,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
         workspaceDir: "/tmp/workspace",
         allowGatewaySubagentBinding: true,
       }),
+      { catalogMode: "static" },
     );
   });
 
@@ -1170,6 +1172,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
           }),
         ]),
       }),
+      { catalogMode: "static" },
     );
   });
 

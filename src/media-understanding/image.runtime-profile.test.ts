@@ -774,6 +774,7 @@ describe("describeImageWithModelCore", () => {
 
     expect(acquireAgentRunPreparedModelRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceDir: "/tmp/openclaw-workspace" }),
+      { catalogMode: "static" },
     );
     expect(resolveModelAsyncMock).toHaveBeenCalledWith(
       "google",

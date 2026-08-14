@@ -218,13 +218,20 @@ export async function resolveImageRuntime(
         snapshot: params.preparedModelRuntime as PreparedModelRuntimeSnapshot,
         release: () => {},
       }
-    : await acquireAgentRunPreparedModelRuntime({
-        agentDir: params.agentDir,
-        ...(params.agentId ? { agentId: params.agentId } : {}),
-        config: params.cfg ?? {},
-        inheritedAuthDir: resolveDefaultAgentDir(params.cfg ?? {}),
-        ...(runtimeParams.workspaceDir ? { workspaceDir: runtimeParams.workspaceDir } : {}),
-      });
+    : await acquireAgentRunPreparedModelRuntime(
+        {
+          agentDir: params.agentDir,
+          ...(params.agentId ? { agentId: params.agentId } : {}),
+          config: params.cfg ?? {},
+          inheritedAuthDir: resolveDefaultAgentDir(params.cfg ?? {}),
+          ...(runtimeParams.workspaceDir ? { workspaceDir: runtimeParams.workspaceDir } : {}),
+        },
+        {
+          // Media resolution uses the configured projection plus lazy per-ref discovery; the full
+          // live inventory stays behind the snapshot's control-plane loader.
+          catalogMode: "static",
+        },
+      );
   let leaseRetained = false;
   const retainLease = (resolved: PreparedImageRuntime): ResolvedImageRuntime => {
     leaseRetained = true;

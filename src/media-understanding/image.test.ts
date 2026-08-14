@@ -746,6 +746,7 @@ describe("describeImageWithModelCore", () => {
         agentDir: "/tmp/openclaw-agent",
         workspaceDir: "/tmp/openclaw-workspace",
       }),
+      { catalogMode: "static" },
     );
     expect(releasePreparedModelRuntimeMock).toHaveBeenCalledOnce();
     expect(resolveModelAsyncMock).toHaveBeenCalledWith(

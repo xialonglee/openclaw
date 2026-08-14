@@ -45,7 +45,7 @@ export type PreparedModelRuntimeSnapshot = Readonly<{
   metadataSnapshot: PluginMetadataSnapshot;
   messageToolCatalog?: PreparedMessageToolCatalog;
   mediaCapabilityProviders?: ReturnType<typeof prepareMediaCapabilityProviders>;
-  /** Registry value owned by this generation; omitted from read-only/static-catalog builds. */
+  /** Registry value owned by this generation; omitted from read-only builds. */
   pluginRegistry?: PluginRegistry;
   allowGatewaySubagentBinding: boolean;
   /**
