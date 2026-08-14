@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   proof:
-    name: before/after real-behavior proof
+    name: before/after real-gateway proof
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -16,6 +16,7 @@ jobs:
       AFTER_SHA: 155b30105deddf3d23bea628f375d9ea9ea65449
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
+      OPENCLAW_E2E_VERBOSE: 1
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -51,27 +52,29 @@ jobs:
           corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
           pnpm install --frozen-lockfile
 
-      # ③ Run the proof test against BEFORE_SHA: the static catalog-mode branch
-      #    already exists at base, so the mechanism markers must already pass.
-      - name: Prove BEFORE (mechanism baseline)
+      # ③ Run the real-gateway proof against BEFORE_SHA. The e2e global setup
+      #    builds the dist the Gateway server lazily imports.
+      - name: Prove BEFORE (real gateway, static mechanism baseline)
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
-          cp "$GITHUB_WORKSPACE/proof-branch/src/agents/compact-static-catalog.proof.test.ts" \
-             src/agents/compact-static-catalog.proof.test.ts
+          cp "$GITHUB_WORKSPACE/proof-branch/test/compact-static-catalog.real-gateway-proof.e2e.test.ts" \
+             test/compact-static-catalog.real-gateway-proof.e2e.test.ts
           PROOF_MODE=before npx vitest run \
-            --config test/vitest/vitest.agents.config.ts \
-            src/agents/compact-static-catalog.proof.test.ts \
+            --config test/vitest/vitest.e2e.config.ts \
+            test/compact-static-catalog.real-gateway-proof.e2e.test.ts \
             2>&1 | tee "$RUNNER_TEMP/proof-before.log"
           echo ""
           echo "=== BEFORE markers ==="
           grep -F '[proof]' "$RUNNER_TEMP/proof-before.log"
           echo "=== BEFORE assertions ==="
-          grep -F '[proof] scene=static mode=before' "$RUNNER_TEMP/proof-before.log" \
-            | grep -F 'status=pass' | grep -F 'configured_resolved=true' | grep -F 'full_catalog=false'
-          grep -F '[proof] scene=live mode=before' "$RUNNER_TEMP/proof-before.log" \
+          grep -F '[proof] scene=live-acquire mode=before' "$RUNNER_TEMP/proof-before.log" \
             | grep -F 'status=pass' | grep -F 'full_catalog=true'
+          grep -F '[proof] scene=gateway-call mode=before' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass' | grep -F 'run_wait=ok'
+          grep -F '[proof] scene=static-acquire mode=before' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass' | grep -F 'configured_resolved=true' | grep -F 'full_catalog=false'
 
       # ④ Install dependencies at AFTER_SHA.
       - name: Install dependencies (after)
@@ -82,27 +85,28 @@ jobs:
           git checkout --detach "$AFTER_SHA"
           pnpm install --frozen-lockfile
 
-      # ⑤ Run the proof test against AFTER_SHA: the four callers now pass
-      #    catalogMode "static", and the mechanism markers must still pass.
-      - name: Prove AFTER (mechanism unchanged, callers now static)
+      # ⑤ Run the real-gateway proof against AFTER_SHA.
+      - name: Prove AFTER (real gateway, callers now static)
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
-          cp "$GITHUB_WORKSPACE/proof-branch/src/agents/compact-static-catalog.proof.test.ts" \
-             src/agents/compact-static-catalog.proof.test.ts
+          cp "$GITHUB_WORKSPACE/proof-branch/test/compact-static-catalog.real-gateway-proof.e2e.test.ts" \
+             test/compact-static-catalog.real-gateway-proof.e2e.test.ts
           PROOF_MODE=after npx vitest run \
-            --config test/vitest/vitest.agents.config.ts \
-            src/agents/compact-static-catalog.proof.test.ts \
+            --config test/vitest/vitest.e2e.config.ts \
+            test/compact-static-catalog.real-gateway-proof.e2e.test.ts \
             2>&1 | tee "$RUNNER_TEMP/proof-after.log"
           echo ""
           echo "=== AFTER markers ==="
           grep -F '[proof]' "$RUNNER_TEMP/proof-after.log"
           echo "=== AFTER assertions ==="
-          grep -F '[proof] scene=static mode=after' "$RUNNER_TEMP/proof-after.log" \
-            | grep -F 'status=pass' | grep -F 'configured_resolved=true' | grep -F 'full_catalog=false'
-          grep -F '[proof] scene=live mode=after' "$RUNNER_TEMP/proof-after.log" \
+          grep -F '[proof] scene=live-acquire mode=after' "$RUNNER_TEMP/proof-after.log" \
             | grep -F 'status=pass' | grep -F 'full_catalog=true'
+          grep -F '[proof] scene=gateway-call mode=after' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -F 'run_wait=ok'
+          grep -F '[proof] scene=static-acquire mode=after' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -F 'configured_resolved=true' | grep -F 'full_catalog=false'
 
       # ⑥ Collect the proof summary and upload it as the evidence artifact.
       - name: Collect proof summary
