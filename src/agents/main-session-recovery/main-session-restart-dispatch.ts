@@ -39,7 +39,10 @@ import {
   type MainSessionRecoveryObservation,
   type MainSessionRecoveryReservation,
 } from "./main-session-recovery-state.js";
-import { commitMainSessionRecovery } from "./main-session-recovery-store.js";
+import {
+  commitMainSessionRecovery,
+  createRestoreAdmittedRecoveryInterrupted,
+} from "./main-session-recovery-store.js";
 import { normalizeFiniteTimestamp } from "./main-session-restart-recovery-shared.js";
 
 const log = createSubsystemLogger("main-session-restart-recovery");
@@ -592,33 +595,16 @@ export async function resumeMainSession(params: {
         log.warn(
           `failed to settle ambiguous restart recovery ${params.sessionKey}: ${String(settlementError)}`,
         );
-        const restoreAdmittedRecovery = async () => {
-          if (params.shouldContinue?.() === false) {
-            return undefined;
-          }
-          const restored = await commitMainSessionRecovery({
-            command: {
-              kind: "mark_admitted_recovery_interrupted",
-              lifecycleGeneration,
-              now: Date.now(),
-              runId: recoveryRunId,
-              sessionId: params.entry.sessionId,
-            },
-            requireWriteSuccess: true,
-            shouldContinue: params.shouldContinue,
-            target: { sessionKey: params.sessionKey, storePath: params.storePath },
-          });
-          return params.shouldContinue?.() !== false &&
-            restored.transition.kind === "applied" &&
-            restored.entry &&
-            restored.sessionKey
-            ? {
-                sessionId: restored.entry.sessionId,
-                sessionKey: restored.sessionKey,
-                storePath: params.storePath,
-              }
-            : undefined;
-        };
+        const restoreAdmittedRecovery = createRestoreAdmittedRecoveryInterrupted({
+          agentId: params.agentId,
+          lifecycleGeneration,
+          logWarn: (message) => log.warn(message),
+          runId: recoveryRunId,
+          sessionId: () => params.entry.sessionId,
+          sessionKey: params.sessionKey,
+          shouldContinue: params.shouldContinue,
+          storePath: params.storePath,
+        });
         const restored = await repairMainSessionRecoveryMutation({
           mutation: restoreAdmittedRecovery,
           onDeferredSuccess: scheduleMainSessionRecoveryPendingTarget,
