@@ -57,7 +57,7 @@ async function markRecoveryStore(params: {
           counts.skipped++;
           continue;
         }
-        const interruptedRunId = entry.lifecycleRunId;
+        const interruptedRunId = (entry as SessionEntry).lifecycleRunId;
         if (plan.replaceRuns) {
           entry.restartRecoveryRuns = plan.runs;
         }
