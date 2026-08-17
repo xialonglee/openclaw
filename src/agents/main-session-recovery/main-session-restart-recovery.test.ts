@@ -475,7 +475,7 @@ describe("main-session-restart-recovery", () => {
     const sessionsDir = await makeSessionsDir();
     await writeStore(sessionsDir, {
       "agent:main:main": {
-        ...runningSessionEntry("main-session"),
+        ...runningSessionEntry("main-session", { lifecycleRunId: "restart-run" }),
       },
       "agent:main:completed": {
         sessionId: "completed-session",
@@ -531,6 +531,7 @@ describe("main-session-restart-recovery", () => {
     expect(trajectoryEvents).toEqual([
       expect.objectContaining({
         type: "session.ended",
+        runId: "restart-run",
         data: expect.objectContaining({ status: "interrupted", aborted: true }),
       }),
     ]);
@@ -2658,6 +2659,7 @@ describe("main-session-restart-recovery", () => {
         sessionId: "main-session",
         updatedAt: cutoff - 10_000,
         status: "running",
+        lifecycleRunId: "orphan-run",
       },
       "agent:main:active-key": {
         sessionId: "active-key-session",
@@ -2746,6 +2748,7 @@ describe("main-session-restart-recovery", () => {
     expect(orphanTrajectoryEvents).toEqual([
       expect.objectContaining({
         type: "session.ended",
+        runId: "orphan-run",
         data: expect.objectContaining({ status: "interrupted", aborted: true }),
       }),
     ]);
