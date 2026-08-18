@@ -56,6 +56,12 @@ type ReplacementProjectionParams<T, TReplacement> = ReplacementProjectionOptions
   ) =>
     | Promise<{ result: T; replacements?: Iterable<TReplacement> }>
     | { result: T; replacements?: Iterable<TReplacement> };
+  /**
+   * Runs inside the same SQLite write transaction after replacements and
+   * maintenance are applied. Throwing here rolls back the session entry write,
+   * so callers can keep a companion durable fact atomic with the state change.
+   */
+  afterWriteInTransaction?: (result: T) => void;
 };
 
 async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
@@ -196,6 +202,7 @@ async function applySqliteSessionEntryReplacementProjection<T, TReplacement>(
             storePath: params.storePath,
           }),
         );
+        params.afterWriteInTransaction?.(operation.result);
       },
       toDatabaseOptions(resolved),
       { operationLabel: "session.entry-replacements" },
@@ -221,6 +228,7 @@ export async function applySessionEntryExactReplacements<T>(params: {
   update: (
     entries: SessionEntryReplacementSnapshot[],
   ) => Promise<SessionEntryReplacementUpdate<T>> | SessionEntryReplacementUpdate<T>;
+  afterWriteInTransaction?: (result: T) => void;
 }): Promise<T> {
   return await applySqliteSessionEntryReplacementProjection(params, (replacements) =>
     [...(replacements ?? [])].map(({ entry, sessionKey }) => ({
