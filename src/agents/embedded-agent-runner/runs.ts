@@ -28,6 +28,7 @@ import {
 import { getRuntimeConfig } from "../../config/io.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import { loadSessionEntry, updateSessionEntry } from "../../config/sessions/session-accessor.js";
+import { resolveSqliteTargetFromSessionStorePath } from "../../config/sessions/session-sqlite-target.js";
 import type { InternalSessionEntry } from "../../config/sessions/types.js";
 import {
   getAgentEventLifecycleGeneration,
@@ -1072,6 +1073,12 @@ async function persistForceClearedEmbeddedRunTerminalState(params: {
   updatedAt: number;
 }): Promise<void> {
   try {
+    // Resolve the trajectory database target before opening the session write
+    // transaction so filesystem/registry inspection does not run while the
+    // session lock is held.
+    const trajectoryTarget = resolveSqliteTargetFromSessionStorePath(params.storePath, {
+      agentId: params.agentId,
+    });
     let interruptedRunId: string | undefined;
     await updateSessionEntry(
       {
@@ -1113,7 +1120,8 @@ async function persistForceClearedEmbeddedRunTerminalState(params: {
           // event; a stale snapshot returns an unchanged entry and skips the hook.
           if (result.status === "killed") {
             appendInterruptedSessionTrajectoryEndSync({
-              agentId: params.agentId,
+              agentDatabaseAgentId: trajectoryTarget.agentId ?? params.agentId,
+              agentDatabasePath: trajectoryTarget.path,
               runId: interruptedRunId,
               sessionKey: params.sessionKey,
               sessionId: params.sessionId,
