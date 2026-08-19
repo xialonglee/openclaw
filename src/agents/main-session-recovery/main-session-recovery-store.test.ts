@@ -7,6 +7,7 @@ import {
   applySessionEntryLifecycleMutation,
   listSessionEntriesCore,
 } from "../../config/sessions/session-accessor.js";
+import { resolveSqliteTargetFromSessionStorePath } from "../../config/sessions/session-sqlite-target.js";
 import {
   getAgentEventLifecycleGeneration,
   rotateAgentEventLifecycleGeneration,
@@ -56,6 +57,10 @@ describe("main session recovery store", () => {
 
   function read(): SessionEntry {
     return sessionAccessor.loadSessionEntry({ sessionKey, storePath })!;
+  }
+
+  function trajectoryTarget(): ReturnType<typeof resolveSqliteTargetFromSessionStorePath> {
+    return resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" });
   }
 
   function readStore(): Record<string, SessionEntry> {
@@ -687,6 +692,7 @@ describe("main session recovery store", () => {
       sessionId: () => "session-1",
       sessionKey,
       storePath,
+      trajectoryTarget: trajectoryTarget(),
     });
 
     await expect(restoreAdmittedRecovery()).resolves.toEqual({
@@ -737,6 +743,7 @@ describe("main session recovery store", () => {
       sessionKey,
       shouldContinue: () => continuation,
       storePath,
+      trajectoryTarget: trajectoryTarget(),
     });
 
     const resultPromise = restoreAdmittedRecovery();
@@ -776,6 +783,7 @@ describe("main session recovery store", () => {
       sessionId: () => "rotated-session",
       sessionKey,
       storePath,
+      trajectoryTarget: trajectoryTarget(),
     });
 
     await expect(restoreAdmittedRecovery()).resolves.toBeUndefined();
