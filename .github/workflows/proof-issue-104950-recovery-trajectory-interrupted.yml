@@ -1,0 +1,254 @@
+name: Proof issue 104950 recovery trajectory interrupted
+
+on:
+  push:
+    branches:
+      - fix/issue-104950-recovery-trajectory-interrupted-proof
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: 23da04ba8af4a94df1ab41c70e45b10d2df1a647
+      AFTER_SHA: 072620250c4d6eb97038ed0c154262ac30214226
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          # BEFORE_SHA lives on upstream main; AFTER_SHA is the PR head on the fork.
+          git remote add upstream https://github.com/openclaw/openclaw.git
+          git remote add origin https://github.com/xialonglee/openclaw.git
+          git fetch --depth=1 upstream "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Write proof scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+
+          cat > "$source_dir/proof-before.mts" <<'EOF'
+          /**
+           * Real-behavior proof for PR #124953 (before head):
+           * restart marker updates the row but does NOT write a trajectory event.
+           */
+          import { mkdtempSync, rmSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import path from "node:path";
+
+          import { replaceSessionEntry, loadSessionEntry } from "./src/config/sessions/session-accessor.js";
+          import { markRestartAbortedMainSessions } from "./src/agents/main-session-recovery/main-session-restart-recovery-marking.js";
+          import { loadSqliteTrajectoryRuntimeEvents } from "./src/trajectory/runtime-store.sqlite.js";
+
+          const stateDir = mkdtempSync(path.join(tmpdir(), "openclaw-pr124953-proof-before-"));
+          const storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+          const sessionKey = "agent:main:main";
+          const sessionId = "pr124953-proof-before-session";
+          const runId = "pr124953-proof-before-run";
+
+          await replaceSessionEntry(
+            { sessionKey, storePath },
+            {
+              sessionId,
+              updatedAt: Date.now(),
+              status: "running",
+              abortedLastRun: false,
+              lifecycleRunId: runId,
+            },
+          );
+          const result = await markRestartAbortedMainSessions({
+            stateDir,
+            sessionKeys: [sessionKey],
+            reason: "gateway restart drain",
+          });
+          const entry = loadSessionEntry({ sessionKey, storePath });
+          const events = await loadSqliteTrajectoryRuntimeEvents({ sessionId, storePath });
+          const ok = result.marked === 1 && entry?.abortedLastRun === true && events.length === 0;
+          console.log(
+            `[proof] scene=restart_marker_before status=${ok ? "pass" : "fail"} marked=${result.marked} abortedLastRun=${entry?.abortedLastRun} events=${events.length}`,
+          );
+          if (!ok) {
+            console.log(JSON.stringify({ entry, events }, null, 2));
+            process.exit(1);
+          }
+          rmSync(stateDir, { recursive: true, force: true });
+          EOF
+
+          cat > "$source_dir/proof-after.mts" <<'EOF'
+          /**
+           * Real-behavior proof for PR #124953 (after head):
+           * - restart marker writes interrupted trajectory event
+           * - admitted-recovery rollback writes interrupted trajectory event
+           */
+          import { mkdtempSync, rmSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import path from "node:path";
+
+          import { replaceSessionEntry, loadSessionEntry } from "./src/config/sessions/session-accessor.js";
+          import { resolveSqliteTargetFromSessionStorePath } from "./src/config/sessions/session-sqlite-target.js";
+          import { markRestartAbortedMainSessions } from "./src/agents/main-session-recovery/main-session-restart-recovery-marking.js";
+          import { createRestoreAdmittedRecoveryInterrupted } from "./src/agents/main-session-recovery/main-session-recovery-store.js";
+          import { getAgentEventLifecycleGeneration } from "./src/infra/agent-events.js";
+          import { loadSqliteTrajectoryRuntimeEvents } from "./src/trajectory/runtime-store.sqlite.js";
+
+          const stateDir = mkdtempSync(path.join(tmpdir(), "openclaw-pr124953-proof-after-"));
+          const storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+          const sessionKey = "agent:main:main";
+          const lifecycleGeneration = getAgentEventLifecycleGeneration();
+
+          let failed = false;
+
+          // Scenario 1: gateway restart marker
+          const sessionId1 = "pr124953-proof-restart-session";
+          const runId1 = "pr124953-proof-restart-run";
+          await replaceSessionEntry(
+            { sessionKey, storePath },
+            {
+              sessionId: sessionId1,
+              updatedAt: Date.now(),
+              status: "running",
+              abortedLastRun: false,
+              lifecycleRunId: runId1,
+            },
+          );
+          const markResult = await markRestartAbortedMainSessions({
+            stateDir,
+            sessionKeys: [sessionKey],
+            reason: "gateway restart drain",
+          });
+          const entry1 = loadSessionEntry({ sessionKey, storePath });
+          const events1 = await loadSqliteTrajectoryRuntimeEvents({ sessionId: sessionId1, storePath });
+          const ok1 =
+            markResult.marked === 1 &&
+            entry1?.abortedLastRun === true &&
+            events1.length === 1 &&
+            events1[0].type === "session.ended" &&
+            events1[0].data?.status === "interrupted" &&
+            events1[0].data?.aborted === true &&
+            events1[0].runId === runId1;
+          console.log(
+            `[proof] scene=restart_marker_after status=${ok1 ? "pass" : "fail"} marked=${markResult.marked} events=${events1.length}`,
+          );
+          if (!ok1) {
+            console.log(JSON.stringify({ entry1, events1 }, null, 2));
+            failed = true;
+          }
+
+          // Scenario 2: admitted-recovery rollback
+          const sessionId2 = "pr124953-proof-admit-session";
+          const runId2 = "pr124953-proof-admit-run";
+          await replaceSessionEntry(
+            { sessionKey, storePath },
+            {
+              sessionId: sessionId2,
+              updatedAt: Date.now(),
+              status: "running",
+              abortedLastRun: true,
+              lifecycleRunId: runId2,
+              mainRestartRecovery: {
+                cycleId: "pr124953-proof-cycle",
+                revision: 1,
+                chargedAttempts: 0,
+              },
+              restartRecoveryRuns: [{ runId: runId2, lifecycleGeneration }],
+            },
+          );
+          const trajectoryTarget = resolveSqliteTargetFromSessionStorePath(storePath);
+          const restore = createRestoreAdmittedRecoveryInterrupted({
+            agentId: trajectoryTarget.agentId ?? "main",
+            lifecycleGeneration,
+            logWarn: (message) => console.log(`[restore warn] ${message}`),
+            runId: runId2,
+            sessionId: () => sessionId2,
+            sessionKey,
+            storePath,
+            trajectoryTarget,
+          });
+          const restoreResult = await restore();
+          const entry2 = loadSessionEntry({ sessionKey, storePath });
+          const events2 = await loadSqliteTrajectoryRuntimeEvents({ sessionId: sessionId2, storePath });
+          const ok2 =
+            restoreResult?.sessionId === sessionId2 &&
+            entry2?.abortedLastRun === true &&
+            entry2?.lifecycleRunId === undefined &&
+            events2.length === 1 &&
+            events2[0].type === "session.ended" &&
+            events2[0].data?.status === "interrupted" &&
+            events2[0].data?.aborted === true &&
+            events2[0].runId === runId2;
+          console.log(
+            `[proof] scene=admitted_recovery_rollback status=${ok2 ? "pass" : "fail"} restored=${!!restoreResult} events=${events2.length}`,
+          );
+          if (!ok2) {
+            console.log(JSON.stringify({ restoreResult, entry2, events2 }, null, 2));
+            failed = true;
+          }
+
+          rmSync(stateDir, { recursive: true, force: true });
+
+          if (failed) {
+            process.exit(1);
+          }
+          EOF
+
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove before fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          pnpm exec tsx proof-before.mts 2>&1 | tee -a proof.log
+
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+
+      - name: Prove after fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          pnpm exec tsx proof-after.mts 2>&1 | tee -a proof.log
+
+      - name: Verify proof markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          grep -E '^\[proof\] scene=(restart_marker_before|restart_marker_after|admitted_recovery_rollback) status=pass' proof.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-issue-104950-recovery-trajectory-interrupted
+          path: ${{ runner.temp }}/proof-source/proof.log
+          retention-days: 30
