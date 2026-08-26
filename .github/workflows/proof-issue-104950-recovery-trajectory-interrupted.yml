@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BEFORE_SHA: 23da04ba8af4a94df1ab41c70e45b10d2df1a647
-      AFTER_SHA: 2a3d0d9a1531501d9b3d74463ea4630091ad2bdd
+      BEFORE_SHA: 2941b3d779f2d3d7f0783245ea8de19f465d526f
+      AFTER_SHA: 1998a0805f83fa0b0e67dd1c7baa42b5920f00a1
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
 
