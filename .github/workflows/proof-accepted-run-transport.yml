@@ -1,0 +1,147 @@
+name: Proof accepted run transport timeout handling
+
+on:
+  push:
+    branches:
+      - fix/issue-111407-accepted-run-no-fallback-proof
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: a3eb0692a24f6e3bcee8d5968d1b43cd2b2b08ec
+      AFTER_SHA: 99a2e17513bccf1445cd8aa9013add0d9d5ad4ad
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+      OPENCLAW_LIVE_TEST: ""
+
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add upstream https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 upstream "$BEFORE_SHA"
+          git fetch --depth=1 upstream "$AFTER_SHA"
+
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove before fix
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+
+          # Run the exact regression tests added by the PR against the pre-fix
+          # source tree.  This demonstrates that the old code does not produce
+          # status: "accepted_timeout" or preserve the accepted run ID.
+          git show "$AFTER_SHA:src/commands/agent-via-gateway.test.ts" > src/commands/agent-via-gateway.test.ts
+
+          proof_root="$RUNNER_TEMP/proof/before"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+
+          set +e
+          pnpm test src/commands/agent-via-gateway.test.ts \
+            -t "after accepting the run|accepted_timeout in json mode|without a session key" \
+            > before-tests.log 2>&1
+          before_exit=$?
+          set -e
+
+          {
+            echo "=== BEFORE FIX ($BEFORE_SHA) ==="
+            echo "test_exit=$before_exit"
+            cat before-tests.log
+            echo ""
+          } >> proof.log
+
+          if [ "$before_exit" -ne 0 ]; then
+            echo "[proof] scene=focused_regression_tests sha=before status=fail expected=accepted_timeout_not_yet_implemented"
+          else
+            echo "[proof] scene=focused_regression_tests sha=before status=unexpected_pass"
+          fi >> proof.log
+
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+
+      - name: Prove after fix
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+
+          proof_root="$RUNNER_TEMP/proof/after"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+
+          set +e
+          pnpm test src/commands/agent-via-gateway.test.ts \
+            -t "after accepting the run|accepted_timeout in json mode|without a session key" \
+            > after-tests.log 2>&1
+          after_exit=$?
+          set -e
+
+          {
+            echo "=== AFTER FIX ($AFTER_SHA) ==="
+            echo "test_exit=$after_exit"
+            cat after-tests.log
+            echo ""
+          } >> proof.log
+
+          if [ "$after_exit" -eq 0 ]; then
+            echo "[proof] scene=focused_regression_tests sha=after status=pass expected=accepted_timeout_implemented"
+          else
+            echo "[proof] scene=focused_regression_tests sha=after status=unexpected_fail"
+          fi >> proof.log
+
+      - name: Verify proof markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+
+          echo "=== PROOF MARKERS ===" >> proof.log
+          grep "\[proof\]" proof.log >> proof.log || true
+
+          grep -q "\[proof\] scene=focused_regression_tests sha=before status=fail" proof.log
+          grep -q "\[proof\] scene=focused_regression_tests sha=after status=pass" proof.log
+          echo "[proof] scene=verification status=pass" >> proof.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-accepted-run-transport
+          path: ${{ runner.temp }}/proof-source/proof.log
+          retention-days: 30
