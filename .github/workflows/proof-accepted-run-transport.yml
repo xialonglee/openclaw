@@ -77,19 +77,23 @@ jobs:
             echo "test_exit=$before_exit"
             cat before-tests.log
             echo ""
-          } >> proof.log
+          } >> "$RUNNER_TEMP/proof.log"
 
           if [ "$before_exit" -ne 0 ]; then
             echo "[proof] scene=focused_regression_tests sha=before status=fail expected=accepted_timeout_not_yet_implemented"
           else
             echo "[proof] scene=focused_regression_tests sha=before status=unexpected_pass"
-          fi >> proof.log
+          fi >> "$RUNNER_TEMP/proof.log"
 
       - name: Install dependencies (after)
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
+          # Discard the test file overlay from the before-fix run so the
+          # after-fix checkout is clean.
+          git reset --hard
+          git clean -fd
           git checkout --detach "$AFTER_SHA"
           pnpm install --frozen-lockfile
 
@@ -118,30 +122,29 @@ jobs:
             echo "test_exit=$after_exit"
             cat after-tests.log
             echo ""
-          } >> proof.log
+          } >> "$RUNNER_TEMP/proof.log"
 
           if [ "$after_exit" -eq 0 ]; then
             echo "[proof] scene=focused_regression_tests sha=after status=pass expected=accepted_timeout_implemented"
           else
             echo "[proof] scene=focused_regression_tests sha=after status=unexpected_fail"
-          fi >> proof.log
+          fi >> "$RUNNER_TEMP/proof.log"
 
       - name: Verify proof markers
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/proof-source"
 
-          echo "=== PROOF MARKERS ===" >> proof.log
-          grep "\[proof\]" proof.log >> proof.log || true
+          echo "=== PROOF MARKERS ===" >> "$RUNNER_TEMP/proof.log"
+          grep "\[proof\]" "$RUNNER_TEMP/proof.log" >> "$RUNNER_TEMP/proof.log" || true
 
-          grep -q "\[proof\] scene=focused_regression_tests sha=before status=fail" proof.log
-          grep -q "\[proof\] scene=focused_regression_tests sha=after status=pass" proof.log
-          echo "[proof] scene=verification status=pass" >> proof.log
+          grep -q "\[proof\] scene=focused_regression_tests sha=before status=fail" "$RUNNER_TEMP/proof.log"
+          grep -q "\[proof\] scene=focused_regression_tests sha=after status=pass" "$RUNNER_TEMP/proof.log"
+          echo "[proof] scene=verification status=pass" >> "$RUNNER_TEMP/proof.log"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: proof-accepted-run-transport
-          path: ${{ runner.temp }}/proof-source/proof.log
+          path: ${{ runner.temp }}/proof.log
           retention-days: 30
