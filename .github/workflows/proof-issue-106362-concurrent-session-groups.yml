@@ -340,10 +340,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep '\[proof\] scene=concurrent_add mode=before' "$RUNNER_TEMP/proof.log"
-          grep '\[proof\] scene=concurrent_add mode=after' "$RUNNER_TEMP/proof.log"
-          grep '\[proof\] scene=concurrent_add mode=before status=pass' "$RUNNER_TEMP/proof.log"
-          grep '\[proof\] scene=concurrent_add mode=after status=pass' "$RUNNER_TEMP/proof.log"
+          grep -E '\[proof\] scene=concurrent_add mode=before' "$RUNNER_TEMP/proof.log"
+          grep -E '\[proof\] scene=concurrent_add mode=after' "$RUNNER_TEMP/proof.log"
+          grep -E '\[proof\] scene=concurrent_add mode=before.*status=pass' "$RUNNER_TEMP/proof.log"
+          grep -E '\[proof\] scene=concurrent_add mode=after.*status=pass' "$RUNNER_TEMP/proof.log"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
