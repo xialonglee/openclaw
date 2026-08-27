@@ -223,6 +223,26 @@ describe("proof: real gateway compaction/media static catalog", () => {
         );
         expect(defaultCalls > 0).toBe(defaultExpectDiscovery);
 
+        // Scene 2b (current-head regression): a partial options object with only
+        // retainIdleRunOwner must also default to static catalog mode.
+        resetCatalogBuildSpy();
+        const partialLease = await preparedRuntime.acquireAgentRunPreparedModelRuntime(
+          {
+            agentDir: path.join(tempHome, "proof-partial-agent"),
+            workspaceDir,
+            config: cfg,
+          },
+          { retainIdleRunOwner: true },
+        );
+        partialLease.release();
+        const partialCalls = catalogBuildCalls();
+        const partialExpectDiscovery = PROOF_MODE === "before";
+        const partialPass = partialCalls > 0 === partialExpectDiscovery;
+        emitMarker(
+          `scene=partial-acquire mode=${PROOF_MODE} status=${partialPass ? "pass" : "fail"} ensure_calls=${partialCalls} expected_discovery=${partialExpectDiscovery}`,
+        );
+        expect(partialCalls > 0).toBe(partialExpectDiscovery);
+
         // Scene 3: a real Gateway serves a configured model call in both modes.
         gateway = await startGatewayWithClient({
           cfg,

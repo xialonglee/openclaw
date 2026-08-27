@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 45
     env:
       BEFORE_SHA: 1605dbd3efef1c10da95c4a9bbb51a19a9d07865
-      AFTER_SHA: 2a890be1c9eacc59fc5ddf369e6cf16c52aa698d
+      AFTER_SHA: e65b454c1ce5409b89ea17053cf44e5115005d85
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
       OPENCLAW_E2E_VERBOSE: 1
@@ -73,6 +73,8 @@ jobs:
             | grep -F 'status=pass' | grep -E 'ensure_calls=[1-9]'
           grep -F '[proof] scene=default-acquire mode=before' "$RUNNER_TEMP/proof-before.log" \
             | grep -F 'status=pass' | grep -F 'expected_discovery=true' | grep -E 'ensure_calls=[1-9]'
+          grep -F '[proof] scene=partial-acquire mode=before' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass' | grep -F 'expected_discovery=true' | grep -E 'ensure_calls=[1-9]'
           grep -F '[proof] scene=gateway-call mode=before' "$RUNNER_TEMP/proof-before.log" \
             | grep -F 'status=pass' | grep -F 'run_wait=ok'
 
@@ -104,6 +106,8 @@ jobs:
           grep -F '[proof] scene=live-acquire mode=after' "$RUNNER_TEMP/proof-after.log" \
             | grep -F 'status=pass' | grep -E 'ensure_calls=[1-9]'
           grep -F '[proof] scene=default-acquire mode=after' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -F 'expected_discovery=false' | grep -F 'ensure_calls=0'
+          grep -F '[proof] scene=partial-acquire mode=after' "$RUNNER_TEMP/proof-after.log" \
             | grep -F 'status=pass' | grep -F 'expected_discovery=false' | grep -F 'ensure_calls=0'
           grep -F '[proof] scene=gateway-call mode=after' "$RUNNER_TEMP/proof-after.log" \
             | grep -F 'status=pass' | grep -F 'run_wait=ok'
