@@ -1,0 +1,460 @@
+name: Proof issue 106362 concurrent session groups
+
+on:
+  push:
+    branches: [fix/issue-106362-concurrent-session-groups-proof]
+
+permissions: {}
+
+env:
+  BEFORE_SHA: 82167b0fbda3610b57a5ca423d73a50bd91a8fde
+  AFTER_SHA: 5ae58828e1a973b90d18b1c4f29ecf92388a467a
+  CI: true
+  OPENCLAW_SKIP_UPDATE_CHECK: "1"
+  OPENCLAW_SKIP_CHANNELS: "1"
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v4
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Write proof runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/proof-runner.mts" <<'RUNNER_EOF'
+          import { WebSocket } from "ws";
+          import crypto from "node:crypto";
+
+          const url = process.env.GATEWAY_URL ?? "ws://127.0.0.1:19008";
+          const token = process.env.GATEWAY_TOKEN ?? "proof-token";
+          const mode = process.env.PROOF_MODE ?? "before";
+
+          type ProofClient = {
+            call(method: string, params: unknown): Promise<unknown>;
+            close(): Promise<void>;
+          };
+
+          function sleep(ms: number): Promise<void> {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+          }
+
+          function normalizeDeviceMetadata(value: unknown): string {
+            if (typeof value !== "string") return "";
+            const trimmed = value.trim();
+            if (!trimmed) return "";
+            return trimmed.replace(/[A-Z]/g, (char) => String.fromCharCode(char.charCodeAt(0) + 32));
+          }
+
+          function buildPayload(params: {
+            deviceId: string;
+            clientId: string;
+            clientMode: string;
+            role: string;
+            scopes: string[];
+            signedAtMs: number;
+            token?: string | null;
+            nonce: string;
+            platform: string;
+            deviceFamily: string;
+          }): string {
+            const scopes = params.scopes.join(",");
+            const token = params.token ?? "";
+            const platform = normalizeDeviceMetadata(params.platform);
+            const deviceFamily = normalizeDeviceMetadata(params.deviceFamily);
+            return [
+              "v3",
+              params.deviceId,
+              params.clientId,
+              params.clientMode,
+              params.role,
+              scopes,
+              String(params.signedAtMs),
+              token,
+              params.nonce,
+              platform,
+              deviceFamily,
+            ].join("|");
+          }
+
+          function generateIdentity() {
+            const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+            const deviceId = crypto.randomUUID();
+            return {
+              deviceId,
+              publicKeyPem: publicKey.export({ type: "spki", format: "pem" }) as string,
+              privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }) as string,
+            };
+          }
+
+          function publicKeyRawBase64Url(publicKeyPem: string): string {
+            const publicKey = crypto.createPublicKey(publicKeyPem);
+            const raw = publicKey.export({ type: "raw", format: "der" });
+            return raw.toString("base64url");
+          }
+
+          function signPayload(privateKeyPem: string, payload: string): string {
+            const privateKey = crypto.createPrivateKey(privateKeyPem);
+            return crypto.sign(null, Buffer.from(payload), privateKey).toString("base64url");
+          }
+
+          async function openWebSocket(): Promise<WebSocket> {
+            return new Promise((resolve, reject) => {
+              const ws = new WebSocket(url);
+              const timer = setTimeout(() => {
+                ws.terminate();
+                reject(new Error("websocket open timeout"));
+              }, 10_000);
+              ws.once("open", () => {
+                clearTimeout(timer);
+                resolve(ws);
+              });
+              ws.once("error", (err) => {
+                clearTimeout(timer);
+                ws.terminate();
+                reject(err);
+              });
+            });
+          }
+
+          async function readChallenge(ws: WebSocket): Promise<string> {
+            return new Promise((resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error("connect challenge timeout")), 10_000);
+              const closeHandler = (code: number, reason: Buffer) => {
+                clearTimeout(timer);
+                ws.off("message", handler);
+                reject(new Error(`closed ${code}: ${reason.toString()}`.trim()));
+              };
+              const handler = (data: WebSocket.RawData) => {
+                try {
+                  const obj = JSON.parse(data.toString("utf8")) as {
+                    type?: unknown;
+                    event?: unknown;
+                    payload?: { nonce?: unknown } | null;
+                  };
+                  if (obj.type !== "event" || obj.event !== "connect.challenge") return;
+                  const n = obj.payload?.nonce;
+                  if (typeof n !== "string" || n.trim().length === 0) return;
+                  clearTimeout(timer);
+                  ws.off("message", handler);
+                  ws.off("close", closeHandler);
+                  resolve(n.trim());
+                } catch {
+                  // ignore
+                }
+              };
+              ws.on("message", handler);
+              ws.once("close", closeHandler);
+            });
+          }
+
+          async function sendConnect(ws: WebSocket, label: string): Promise<void> {
+            const identity = generateIdentity();
+            const nonce = await readChallenge(ws);
+            const signedAtMs = Date.now();
+            const payload = buildPayload({
+              deviceId: identity.deviceId,
+              clientId: "openclaw-proof",
+              clientMode: "test",
+              role: "operator",
+              scopes: ["operator.read", "operator.write", "operator.admin"],
+              signedAtMs,
+              token,
+              nonce,
+              platform: process.platform,
+              deviceFamily: "proof",
+            });
+            const connectReqId = `connect-${label}`;
+            const connectRes = await new Promise<{ ok: boolean; error?: { message?: string } }>(
+              (resolve, reject) => {
+                const timer = setTimeout(
+                  () => reject(new Error(`${label}: connect response timeout`)),
+                  10_000,
+                );
+                const handler = (data: WebSocket.RawData) => {
+                  try {
+                    const obj = JSON.parse(data.toString("utf8")) as {
+                      type?: unknown;
+                      id?: unknown;
+                      ok?: unknown;
+                      error?: { message?: string };
+                    };
+                    if (obj.type !== "res" || obj.id !== connectReqId) return;
+                    clearTimeout(timer);
+                    ws.off("message", handler);
+                    resolve(obj as { ok: boolean; error?: { message?: string } });
+                  } catch {
+                    // ignore
+                  }
+                };
+                ws.on("message", handler);
+                ws.send(
+                  JSON.stringify({
+                    type: "req",
+                    id: connectReqId,
+                    method: "connect",
+                    params: {
+                      minProtocol: 0,
+                      maxProtocol: 9999,
+                      client: {
+                        id: "openclaw-proof",
+                        displayName: `proof-${label}`,
+                        version: "dev",
+                        platform: process.platform,
+                        mode: "test",
+                      },
+                      caps: [],
+                      auth: { token },
+                      device: {
+                        id: identity.deviceId,
+                        publicKey: publicKeyRawBase64Url(identity.publicKeyPem),
+                        signature: signPayload(identity.privateKeyPem, payload),
+                        signedAt: signedAtMs,
+                        nonce,
+                      },
+                    },
+                  }),
+                );
+              },
+            );
+            if (!connectRes.ok) {
+              throw new Error(`${label}: connect failed: ${connectRes.error?.message ?? "unknown"}`);
+            }
+          }
+
+          async function connectClient(label: string): Promise<ProofClient> {
+            let lastError: unknown;
+            for (let attempt = 1; attempt <= 30; attempt += 1) {
+              try {
+                const ws = await openWebSocket();
+                try {
+                  await sendConnect(ws, label);
+                } catch (err) {
+                  ws.terminate();
+                  throw err;
+                }
+
+                let requestCounter = 0;
+                const call = (method: string, params: unknown): Promise<unknown> => {
+                  const id = `req-${label}-${(requestCounter += 1)}`;
+                  return new Promise((resolve, reject) => {
+                    const timer = setTimeout(
+                      () => reject(new Error(`${label}: ${method} timeout`)),
+                      10_000,
+                    );
+                    const handler = (data: WebSocket.RawData) => {
+                      try {
+                        const obj = JSON.parse(data.toString("utf8")) as {
+                          type?: unknown;
+                          id?: unknown;
+                          ok?: unknown;
+                          result?: unknown;
+                          error?: { message?: string; code?: string };
+                        };
+                        if (obj.type !== "res" || obj.id !== id) return;
+                        clearTimeout(timer);
+                        ws.off("message", handler);
+                        if (obj.ok) {
+                          resolve(obj.result);
+                        } else {
+                          reject(
+                            new Error(
+                              `${label}: ${method} failed: ${obj.error?.code ?? ""} ${obj.error?.message ?? ""}`.trim(),
+                            ),
+                          );
+                        }
+                      } catch {
+                        // ignore parse errors
+                      }
+                    };
+                    ws.on("message", handler);
+                    ws.send(JSON.stringify({ type: "req", id, method, params }));
+                  });
+                };
+
+                return {
+                  call,
+                  close: () =>
+                    new Promise<void>((resolve) => {
+                      if (ws.readyState === WebSocket.CLOSED) {
+                        resolve();
+                        return;
+                      }
+                      ws.once("close", () => resolve());
+                      ws.close();
+                    }),
+                };
+              } catch (err) {
+                lastError = err;
+                await sleep(1_000);
+              }
+            }
+            throw new Error(`${label}: failed to connect after 30 attempts: ${String(lastError)}`);
+          }
+
+          async function main() {
+            const clientA = await connectClient("A");
+            const clientB = await connectClient("B");
+            try {
+              if (mode === "before") {
+                // Simulate two Control UI tabs both replacing the whole catalog from stale state.
+                await clientA.call("sessions.groups.put", { names: ["Client-A"] });
+                await clientB.call("sessions.groups.put", { names: ["Client-B"] });
+              } else {
+                // Simulate two Control UI tabs adding distinct groups atomically.
+                await clientA.call("sessions.groups.add", { name: "Client-A" });
+                await clientB.call("sessions.groups.add", { name: "Client-B" });
+              }
+              const listResult = (await clientA.call("sessions.groups.list", {})) as {
+                groups?: { name: string; position: number }[];
+              };
+              const groups = listResult.groups ?? [];
+              const names = groups.map((g) => g.name);
+              const expectedCount = mode === "before" ? 1 : 2;
+              const expectedFirst = mode === "before" ? "Client-B" : "Client-A";
+              const pass = groups.length === expectedCount && names[0] === expectedFirst;
+              console.log(
+                `[proof] scene=concurrent_add mode=${mode} groups=${JSON.stringify(names)} expected_count=${expectedCount} expected_first=${expectedFirst} status=${pass ? "pass" : "fail"}`,
+              );
+              if (!pass) {
+                process.exitCode = 1;
+              }
+            } finally {
+              await clientA.close();
+              await clientB.close();
+            }
+          }
+
+          main().catch((err) => {
+            console.error(`[proof] scene=concurrent_add mode=${mode} status=error error=${err.message}`);
+            process.exitCode = 1;
+          });
+          RUNNER_EOF
+
+      - name: Build and prove before fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          proof_root="$RUNNER_TEMP/proof/before"
+          rm -rf "$proof_root"
+          mkdir -p "$proof_root/home" "$proof_root/state"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          cat > "$OPENCLAW_CONFIG_PATH" <<'CONFIG_EOF'
+          {
+            "gateway": {
+              "mode": "local",
+              "port": 19008,
+              "bind": "127.0.0.1",
+              "auth": { "mode": "token", "token": "proof-token" },
+              "controlUi": { "enabled": false }
+            }
+          }
+          CONFIG_EOF
+
+          cd "$source_dir"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+          node --import tsx scripts/build-all.mts gatewayWatch
+
+          echo "[proof] starting before gateway"
+          node dist/cli/run-main.js gateway run > "$proof_root/gateway.log" 2>&1 &
+          gateway_pid=$!
+
+          # Wait for the gateway process to finish starting or exit early.
+          sleep 3
+          if ! kill -0 "$gateway_pid" 2>/dev/null; then
+            echo "[proof] before gateway exited early"
+            cat "$proof_root/gateway.log"
+            exit 1
+          fi
+
+          cd "$source_dir"
+          GATEWAY_URL="ws://127.0.0.1:19008" GATEWAY_TOKEN="proof-token" PROOF_MODE="before" \
+            node --import tsx "$RUNNER_TEMP/proof-runner.mts" 2>&1 | tee -a "$RUNNER_TEMP/proof.log"
+
+          kill "$gateway_pid" || true
+          wait "$gateway_pid" 2>/dev/null || true
+
+      - name: Build and prove after fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          proof_root="$RUNNER_TEMP/proof/after"
+          rm -rf "$proof_root"
+          mkdir -p "$proof_root/home" "$proof_root/state"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          cat > "$OPENCLAW_CONFIG_PATH" <<'CONFIG_EOF'
+          {
+            "gateway": {
+              "mode": "local",
+              "port": 19008,
+              "bind": "127.0.0.1",
+              "auth": { "mode": "token", "token": "proof-token" },
+              "controlUi": { "enabled": false }
+            }
+          }
+          CONFIG_EOF
+
+          cd "$source_dir"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+          node --import tsx scripts/build-all.mts gatewayWatch
+
+          echo "[proof] starting after gateway"
+          node dist/cli/run-main.js gateway run > "$proof_root/gateway.log" 2>&1 &
+          gateway_pid=$!
+
+          sleep 3
+          if ! kill -0 "$gateway_pid" 2>/dev/null; then
+            echo "[proof] after gateway exited early"
+            cat "$proof_root/gateway.log"
+            exit 1
+          fi
+
+          cd "$source_dir"
+          GATEWAY_URL="ws://127.0.0.1:19008" GATEWAY_TOKEN="proof-token" PROOF_MODE="after" \
+            node --import tsx "$RUNNER_TEMP/proof-runner.mts" 2>&1 | tee -a "$RUNNER_TEMP/proof.log"
+
+          kill "$gateway_pid" || true
+          wait "$gateway_pid" 2>/dev/null || true
+
+      - name: Verify proof markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep '\[proof\] scene=concurrent_add mode=before' "$RUNNER_TEMP/proof.log"
+          grep '\[proof\] scene=concurrent_add mode=after' "$RUNNER_TEMP/proof.log"
+          grep '\[proof\] scene=concurrent_add mode=before status=pass' "$RUNNER_TEMP/proof.log"
+          grep '\[proof\] scene=concurrent_add mode=after status=pass' "$RUNNER_TEMP/proof.log"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-issue-106362
+          path: ${{ runner.temp }}/proof.log
+          retention-days: 30
