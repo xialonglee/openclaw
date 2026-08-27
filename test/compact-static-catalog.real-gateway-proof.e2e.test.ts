@@ -34,6 +34,15 @@ vi.mock("../src/agents/models-config.js", async (importOriginal) => {
 
 const PROOF_MODE = process.env.PROOF_MODE?.trim() || "before";
 
+const preparedModelRuntimeTestApi = (globalThis as Record<PropertyKey, unknown>)[
+  Symbol.for("openclaw.preparedModelRuntimeTestApi")
+] as
+  | {
+      resetPreparedModelRuntimeSnapshotsForTest(): void;
+      getPreparedModelRuntimeOwnerCountForTest(): number;
+    }
+  | undefined;
+
 const envKeys = [
   "HOME",
   "OPENCLAW_STATE_DIR",
@@ -89,9 +98,92 @@ function buildResponsesSse(text: string): string {
     .join("");
 }
 
+function buildModelsListResponse(modelIds: readonly string[]): unknown {
+  return {
+    object: "list",
+    data: modelIds.map((id) => ({
+      id,
+      object: "model",
+      created: 1_700_000_000,
+      owned_by: "proof",
+    })),
+  };
+}
+
+async function startDelayedProviderServer(delayMs: number): Promise<{
+  server: Server;
+  port: number;
+  close: () => Promise<void>;
+}> {
+  const server = createServer((request, response) => {
+    if (request.url?.startsWith("/v1/models")) {
+      setTimeout(() => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(buildModelsListResponse(["gpt-5.4"])));
+      }, delayMs);
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(buildResponsesSse("COMPACT_STATIC_CATALOG_PROOF_OK"));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("proof provider did not bind a loopback port");
+  }
+  return {
+    server,
+    port: address.port,
+    close: async () => {
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      }).catch(() => undefined);
+    },
+  };
+}
+
+function buildOpenAiResponsesProviderConfig(
+  providerId: string,
+  baseUrl: string,
+  modelId = "gpt-5.4",
+): { providerId: string; modelId: string; modelRef: string; config: unknown } {
+  return {
+    providerId,
+    modelId,
+    modelRef: `${providerId}/${modelId}`,
+    config: {
+      baseUrl,
+      apiKey: "test",
+      api: "openai-responses",
+      models: [
+        {
+          id: modelId,
+          name: modelId,
+          api: "openai-responses",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128_000,
+          maxTokens: 4096,
+        },
+      ],
+    },
+  };
+}
+
+function rssMb(): number {
+  return Math.round((process.memoryUsage().rss / 1024 / 1024) * 100) / 100;
+}
+
 describe("proof: real gateway compaction/media static catalog", () => {
   let tempHome: string | undefined;
   let providerServer: Server | undefined;
+  let delayedProviderServers: Awaited<ReturnType<typeof startDelayedProviderServer>>[] = [];
   let gateway: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
   afterEach(async () => {
     if (gateway) {
@@ -100,8 +192,17 @@ describe("proof: real gateway compaction/media static catalog", () => {
       gateway = undefined;
     }
     if (providerServer?.listening) {
-      await new Promise<void>((resolve) => providerServer?.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        providerServer?.close(() => {
+          resolve();
+        });
+      });
+      providerServer = undefined;
     }
+    for (const delayed of delayedProviderServers) {
+      await delayed.close();
+    }
+    delayedProviderServers = [];
     if (tempHome) {
       await fs.rm(tempHome, { recursive: true, force: true }).catch(() => undefined);
       tempHome = undefined;
@@ -267,10 +368,129 @@ describe("proof: real gateway compaction/media static catalog", () => {
         const modelCallSucceeded =
           started.status === "started" && started.runId !== undefined && waitResult.status === "ok";
         emitMarker(
-          `scene=gateway-call mode=${PROOF_MODE} status=${modelCallSucceeded ? "pass" : "fail"} run_started=${started.status === "started"} run_wait=${waitResult.status}`,
+          `scene=gateway-call mode=${PROOF_MODE} status=${modelCallSucceeded ? "pass" : "fail"} run_started=${started.status === "started"} run_wait=${String(waitResult.status)}`,
         );
         expect(started.status).toBe("started");
         expect(waitResult.status).toBe("ok");
+
+        // Scene 4: multi-provider timing/RSS benchmark. Reset the lifecycle
+        // owners first so this scene is not rebound to the Gateway-published
+        // owner from Scene 3; then spin up five independent mock providers.
+        preparedModelRuntimeTestApi?.resetPreparedModelRuntimeSnapshotsForTest();
+
+        // Scene 4: multi-provider timing/RSS benchmark. Five independent mock
+        // providers each delay their /v1/models response. In BEFORE the default
+        // acquisition serializes live discovery across all five; in AFTER it uses
+        // the static configured catalog and skips the HTTP calls entirely.
+        const PROVIDER_COUNT = 5;
+        const PER_PROVIDER_DELAY_MS = 300;
+        delayedProviderServers = await Promise.all(
+          Array.from({ length: PROVIDER_COUNT }, () =>
+            startDelayedProviderServer(PER_PROVIDER_DELAY_MS),
+          ),
+        );
+        const benchmarkProviders = delayedProviderServers.map((server, index) =>
+          buildOpenAiResponsesProviderConfig(
+            `mock-openai-bench-${index + 1}`,
+            `http://127.0.0.1:${server.port}/v1`,
+            `gpt-5.4-bench-${index + 1}`,
+          ),
+        );
+        const primaryBenchmarkProvider = benchmarkProviders[0];
+        const benchmarkCfg = {
+          agents: {
+            defaults: {
+              workspace: workspaceDir,
+              skipBootstrap: true,
+              model: { primary: primaryBenchmarkProvider.modelRef },
+              models: {
+                [primaryBenchmarkProvider.modelRef]: {
+                  params: { transport: "sse", openaiWsWarmup: false },
+                },
+              },
+            },
+            entries: { main: { default: true } },
+          },
+          models: {
+            mode: "replace",
+            providers: Object.fromEntries(benchmarkProviders.map((p) => [p.providerId, p.config])),
+          },
+          gateway: { auth: { mode: "token", token: "compact-static-proof-token" } },
+        };
+
+        async function measureAcquisition(
+          label: string,
+          input: Omit<
+            Parameters<typeof preparedRuntime.acquireAgentRunPreparedModelRuntime>[0],
+            "agentId"
+          > & {
+            agentId?: string;
+          },
+          options?: Parameters<typeof preparedRuntime.acquireAgentRunPreparedModelRuntime>[1],
+        ): Promise<{ ms: number; rssBeforeMb: number; rssAfterMb: number }> {
+          resetCatalogBuildSpy();
+          const rssBeforeMb = rssMb();
+          const startedAt = performance.now();
+          const lease = await preparedRuntime.acquireAgentRunPreparedModelRuntime(input, options);
+          const ms = Math.round(performance.now() - startedAt);
+          const rssAfterMb = rssMb();
+          lease.release();
+          return { ms, rssBeforeMb, rssAfterMb };
+        }
+
+        const liveResult = await measureAcquisition(
+          "live",
+          {
+            agentId: "main",
+            agentDir: path.join(tempHome, "proof-bench-live-agent"),
+            workspaceDir,
+            config: benchmarkCfg,
+          },
+          { catalogMode: "live" },
+        );
+        const liveDiscoveryCalls = catalogBuildCalls();
+        emitMarker(
+          `scene=multi-provider-benchmark mode=${PROOF_MODE} subscene=live status=pass ensure_calls=${liveDiscoveryCalls} provider_count=${PROVIDER_COUNT} per_provider_delay_ms=${PER_PROVIDER_DELAY_MS} ms=${liveResult.ms} rss_before_mb=${liveResult.rssBeforeMb} rss_after_mb=${liveResult.rssAfterMb}`,
+        );
+        expect(liveDiscoveryCalls).toBeGreaterThan(0);
+
+        const benchDefaultExpectDiscovery = PROOF_MODE === "before";
+        const defaultResult = await measureAcquisition("default", {
+          agentId: "main",
+          agentDir: path.join(tempHome, "proof-bench-default-agent"),
+          workspaceDir,
+          config: benchmarkCfg,
+        });
+        const defaultDiscoveryCalls = catalogBuildCalls();
+        const benchDefaultPass = defaultDiscoveryCalls > 0 === benchDefaultExpectDiscovery;
+        emitMarker(
+          `scene=multi-provider-benchmark mode=${PROOF_MODE} subscene=default status=${benchDefaultPass ? "pass" : "fail"} ensure_calls=${defaultDiscoveryCalls} expected_discovery=${benchDefaultExpectDiscovery} provider_count=${PROVIDER_COUNT} per_provider_delay_ms=${PER_PROVIDER_DELAY_MS} ms=${defaultResult.ms} rss_before_mb=${defaultResult.rssBeforeMb} rss_after_mb=${defaultResult.rssAfterMb}`,
+        );
+        expect(defaultDiscoveryCalls > 0).toBe(benchDefaultExpectDiscovery);
+
+        const benchPartialExpectDiscovery = PROOF_MODE === "before";
+        const partialResult = await measureAcquisition(
+          "partial",
+          {
+            agentId: "main",
+            agentDir: path.join(tempHome, "proof-bench-partial-agent"),
+            workspaceDir,
+            config: benchmarkCfg,
+          },
+          { retainIdleRunOwner: true },
+        );
+        const partialDiscoveryCalls = catalogBuildCalls();
+        const benchPartialPass = partialDiscoveryCalls > 0 === benchPartialExpectDiscovery;
+        emitMarker(
+          `scene=multi-provider-benchmark mode=${PROOF_MODE} subscene=partial status=${benchPartialPass ? "pass" : "fail"} ensure_calls=${partialDiscoveryCalls} expected_discovery=${benchPartialExpectDiscovery} provider_count=${PROVIDER_COUNT} per_provider_delay_ms=${PER_PROVIDER_DELAY_MS} ms=${partialResult.ms} rss_before_mb=${partialResult.rssBeforeMb} rss_after_mb=${partialResult.rssAfterMb}`,
+        );
+        expect(partialDiscoveryCalls > 0).toBe(benchPartialExpectDiscovery);
+
+        // Sanity: static acquisitions should be materially faster than live discovery.
+        if (PROOF_MODE === "after") {
+          expect(defaultResult.ms).toBeLessThan(liveResult.ms / 2);
+          expect(partialResult.ms).toBeLessThan(liveResult.ms / 2);
+        }
       } finally {
         envSnapshot.restore();
       }

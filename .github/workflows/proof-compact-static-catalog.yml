@@ -77,6 +77,12 @@ jobs:
             | grep -F 'status=pass' | grep -F 'expected_discovery=true' | grep -E 'ensure_calls=[1-9]'
           grep -F '[proof] scene=gateway-call mode=before' "$RUNNER_TEMP/proof-before.log" \
             | grep -F 'status=pass' | grep -F 'run_wait=ok'
+          grep -F '[proof] scene=multi-provider-benchmark mode=before subscene=live' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass' | grep -E 'ensure_calls=[1-9]'
+          grep -F '[proof] scene=multi-provider-benchmark mode=before subscene=default' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass' | grep -F 'expected_discovery=true' | grep -E 'ensure_calls=[1-9]'
+          grep -F '[proof] scene=multi-provider-benchmark mode=before subscene=partial' "$RUNNER_TEMP/proof-before.log" \
+            | grep -F 'status=pass' | grep -F 'expected_discovery=true' | grep -E 'ensure_calls=[1-9]'
 
       # ④ Install dependencies at AFTER_SHA.
       - name: Install dependencies (after)
@@ -111,6 +117,12 @@ jobs:
             | grep -F 'status=pass' | grep -F 'expected_discovery=false' | grep -F 'ensure_calls=0'
           grep -F '[proof] scene=gateway-call mode=after' "$RUNNER_TEMP/proof-after.log" \
             | grep -F 'status=pass' | grep -F 'run_wait=ok'
+          grep -F '[proof] scene=multi-provider-benchmark mode=after subscene=live' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -E 'ensure_calls=[1-9]'
+          grep -F '[proof] scene=multi-provider-benchmark mode=after subscene=default' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -F 'expected_discovery=false' | grep -F 'ensure_calls=0'
+          grep -F '[proof] scene=multi-provider-benchmark mode=after subscene=partial' "$RUNNER_TEMP/proof-after.log" \
+            | grep -F 'status=pass' | grep -F 'expected_discovery=false' | grep -F 'ensure_calls=0'
 
       # ⑥ Collect the proof summary and upload it as the evidence artifact.
       - name: Collect proof summary
