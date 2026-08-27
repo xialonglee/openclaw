@@ -41,7 +41,6 @@ jobs:
           set -euo pipefail
           cat > "$RUNNER_TEMP/proof-runner.mts" <<'RUNNER_EOF'
           import { WebSocket } from "ws";
-          import crypto from "node:crypto";
 
           const url = process.env.GATEWAY_URL ?? "ws://127.0.0.1:19008";
           const token = process.env.GATEWAY_TOKEN ?? "proof-token";
@@ -54,65 +53,6 @@ jobs:
 
           function sleep(ms: number): Promise<void> {
             return new Promise((resolve) => setTimeout(resolve, ms));
-          }
-
-          function normalizeDeviceMetadata(value: unknown): string {
-            if (typeof value !== "string") return "";
-            const trimmed = value.trim();
-            if (!trimmed) return "";
-            return trimmed.replace(/[A-Z]/g, (char) => String.fromCharCode(char.charCodeAt(0) + 32));
-          }
-
-          function buildPayload(params: {
-            deviceId: string;
-            clientId: string;
-            clientMode: string;
-            role: string;
-            scopes: string[];
-            signedAtMs: number;
-            token?: string | null;
-            nonce: string;
-            platform: string;
-            deviceFamily: string;
-          }): string {
-            const scopes = params.scopes.join(",");
-            const token = params.token ?? "";
-            const platform = normalizeDeviceMetadata(params.platform);
-            const deviceFamily = normalizeDeviceMetadata(params.deviceFamily);
-            return [
-              "v3",
-              params.deviceId,
-              params.clientId,
-              params.clientMode,
-              params.role,
-              scopes,
-              String(params.signedAtMs),
-              token,
-              params.nonce,
-              platform,
-              deviceFamily,
-            ].join("|");
-          }
-
-          function generateIdentity() {
-            const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-            const deviceId = crypto.randomUUID();
-            return {
-              deviceId,
-              publicKeyPem: publicKey.export({ type: "spki", format: "pem" }) as string,
-              privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }) as string,
-            };
-          }
-
-          function publicKeyRawBase64Url(publicKeyPem: string): string {
-            const publicKey = crypto.createPublicKey(publicKeyPem);
-            const raw = publicKey.export({ type: "raw", format: "der" });
-            return raw.toString("base64url");
-          }
-
-          function signPayload(privateKeyPem: string, payload: string): string {
-            const privateKey = crypto.createPrivateKey(privateKeyPem);
-            return crypto.sign(null, Buffer.from(payload), privateKey).toString("base64url");
           }
 
           async function openWebSocket(): Promise<WebSocket> {
@@ -134,53 +74,7 @@ jobs:
             });
           }
 
-          async function readChallenge(ws: WebSocket): Promise<string> {
-            return new Promise((resolve, reject) => {
-              const timer = setTimeout(() => reject(new Error("connect challenge timeout")), 10_000);
-              const closeHandler = (code: number, reason: Buffer) => {
-                clearTimeout(timer);
-                ws.off("message", handler);
-                reject(new Error(`closed ${code}: ${reason.toString()}`.trim()));
-              };
-              const handler = (data: WebSocket.RawData) => {
-                try {
-                  const obj = JSON.parse(data.toString("utf8")) as {
-                    type?: unknown;
-                    event?: unknown;
-                    payload?: { nonce?: unknown } | null;
-                  };
-                  if (obj.type !== "event" || obj.event !== "connect.challenge") return;
-                  const n = obj.payload?.nonce;
-                  if (typeof n !== "string" || n.trim().length === 0) return;
-                  clearTimeout(timer);
-                  ws.off("message", handler);
-                  ws.off("close", closeHandler);
-                  resolve(n.trim());
-                } catch {
-                  // ignore
-                }
-              };
-              ws.on("message", handler);
-              ws.once("close", closeHandler);
-            });
-          }
-
           async function sendConnect(ws: WebSocket, label: string): Promise<void> {
-            const identity = generateIdentity();
-            const nonce = await readChallenge(ws);
-            const signedAtMs = Date.now();
-            const payload = buildPayload({
-              deviceId: identity.deviceId,
-              clientId: "openclaw-proof",
-              clientMode: "test",
-              role: "operator",
-              scopes: ["operator.read", "operator.write", "operator.admin"],
-              signedAtMs,
-              token,
-              nonce,
-              platform: process.platform,
-              deviceFamily: "proof",
-            });
             const connectReqId = `connect-${label}`;
             const connectRes = await new Promise<{ ok: boolean; error?: { message?: string } }>(
               (resolve, reject) => {
@@ -211,24 +105,19 @@ jobs:
                     id: connectReqId,
                     method: "connect",
                     params: {
-                      minProtocol: 0,
-                      maxProtocol: 9999,
+                      minProtocol: 4,
+                      maxProtocol: 4,
                       client: {
-                        id: "openclaw-proof",
+                        id: "cli",
                         displayName: `proof-${label}`,
                         version: "dev",
-                        platform: process.platform,
-                        mode: "test",
+                        platform: "linux",
+                        mode: "cli",
                       },
                       caps: [],
+                      role: "operator",
+                      scopes: ["operator.read", "operator.write", "operator.admin"],
                       auth: { token },
-                      device: {
-                        id: identity.deviceId,
-                        publicKey: publicKeyRawBase64Url(identity.publicKeyPem),
-                        signature: signPayload(identity.privateKeyPem, payload),
-                        signedAt: signedAtMs,
-                        nonce,
-                      },
                     },
                   }),
                 );
@@ -265,14 +154,14 @@ jobs:
                           type?: unknown;
                           id?: unknown;
                           ok?: unknown;
-                          result?: unknown;
+                          payload?: unknown;
                           error?: { message?: string; code?: string };
                         };
                         if (obj.type !== "res" || obj.id !== id) return;
                         clearTimeout(timer);
                         ws.off("message", handler);
                         if (obj.ok) {
-                          resolve(obj.result);
+                          resolve(obj.payload);
                         } else {
                           reject(
                             new Error(
@@ -327,11 +216,12 @@ jobs:
               };
               const groups = listResult.groups ?? [];
               const names = groups.map((g) => g.name);
-              const expectedCount = mode === "before" ? 1 : 2;
-              const expectedFirst = mode === "before" ? "Client-B" : "Client-A";
-              const pass = groups.length === expectedCount && names[0] === expectedFirst;
+              const pass =
+                mode === "before"
+                  ? groups.length === 1 && names[0] === "Client-B"
+                  : groups.length === 2 && names.includes("Client-A") && names.includes("Client-B");
               console.log(
-                `[proof] scene=concurrent_add mode=${mode} groups=${JSON.stringify(names)} expected_count=${expectedCount} expected_first=${expectedFirst} status=${pass ? "pass" : "fail"}`,
+                `[proof] scene=concurrent_add mode=${mode} groups=${JSON.stringify(names)} status=${pass ? "pass" : "fail"}`,
               );
               if (!pass) {
                 process.exitCode = 1;
@@ -364,7 +254,7 @@ jobs:
             "gateway": {
               "mode": "local",
               "port": 19008,
-              "bind": "127.0.0.1",
+              "bind": "loopback",
               "auth": { "mode": "token", "token": "proof-token" },
               "controlUi": { "enabled": false }
             }
@@ -379,20 +269,21 @@ jobs:
           node --import tsx scripts/build-all.mts gatewayWatch
 
           echo "[proof] starting before gateway"
-          node dist/cli/run-main.js gateway run > "$proof_root/gateway.log" 2>&1 &
+          node openclaw.mjs gateway run > "$proof_root/gateway.log" 2>&1 &
           gateway_pid=$!
 
-          # Wait for the gateway process to finish starting or exit early.
           sleep 3
           if ! kill -0 "$gateway_pid" 2>/dev/null; then
             echo "[proof] before gateway exited early"
-            cat "$proof_root/gateway.log"
+            ls -la "$proof_root" || true
+            cat "$proof_root/gateway.log" || true
             exit 1
           fi
 
+          cp "$RUNNER_TEMP/proof-runner.mts" "$source_dir/proof-runner.mts"
           cd "$source_dir"
           GATEWAY_URL="ws://127.0.0.1:19008" GATEWAY_TOKEN="proof-token" PROOF_MODE="before" \
-            node --import tsx "$RUNNER_TEMP/proof-runner.mts" 2>&1 | tee -a "$RUNNER_TEMP/proof.log"
+            node --import tsx proof-runner.mts 2>&1 | tee -a "$RUNNER_TEMP/proof.log"
 
           kill "$gateway_pid" || true
           wait "$gateway_pid" 2>/dev/null || true
@@ -413,7 +304,7 @@ jobs:
             "gateway": {
               "mode": "local",
               "port": 19008,
-              "bind": "127.0.0.1",
+              "bind": "loopback",
               "auth": { "mode": "token", "token": "proof-token" },
               "controlUi": { "enabled": false }
             }
@@ -426,19 +317,21 @@ jobs:
           node --import tsx scripts/build-all.mts gatewayWatch
 
           echo "[proof] starting after gateway"
-          node dist/cli/run-main.js gateway run > "$proof_root/gateway.log" 2>&1 &
+          node openclaw.mjs gateway run > "$proof_root/gateway.log" 2>&1 &
           gateway_pid=$!
 
           sleep 3
           if ! kill -0 "$gateway_pid" 2>/dev/null; then
             echo "[proof] after gateway exited early"
-            cat "$proof_root/gateway.log"
+            ls -la "$proof_root" || true
+            cat "$proof_root/gateway.log" || true
             exit 1
           fi
 
+          cp "$RUNNER_TEMP/proof-runner.mts" "$source_dir/proof-runner.mts"
           cd "$source_dir"
           GATEWAY_URL="ws://127.0.0.1:19008" GATEWAY_TOKEN="proof-token" PROOF_MODE="after" \
-            node --import tsx "$RUNNER_TEMP/proof-runner.mts" 2>&1 | tee -a "$RUNNER_TEMP/proof.log"
+            node --import tsx proof-runner.mts 2>&1 | tee -a "$RUNNER_TEMP/proof.log"
 
           kill "$gateway_pid" || true
           wait "$gateway_pid" 2>/dev/null || true
@@ -456,5 +349,8 @@ jobs:
         if: always()
         with:
           name: proof-issue-106362
-          path: ${{ runner.temp }}/proof.log
+          path: |
+            ${{ runner.temp }}/proof.log
+            ${{ runner.temp }}/proof/before/gateway.log
+            ${{ runner.temp }}/proof/after/gateway.log
           retention-days: 30
