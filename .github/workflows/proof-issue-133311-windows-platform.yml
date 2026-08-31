@@ -1,0 +1,175 @@
+name: Proof issue 133311 Windows platform default
+
+on:
+  push:
+    branches: [fix/issue-133311-windows-platform-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: Windows real behavior proof
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: 346fae9a762d8a54ed2d0a49f1c7fdf076ca2710
+      AFTER_SHA: 791a2a90abf2bd2f5cf77af12fed413ba7e744ba
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: pwsh
+        run: |
+          $sourceDir = "$env:RUNNER_TEMP\proof-source"
+          New-Item -ItemType Directory -Force -Path $sourceDir | Out-Null
+          Set-Location $sourceDir
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$env:BEFORE_SHA"
+          git fetch --depth=1 origin "$env:AFTER_SHA"
+
+      - name: Install dependencies (before)
+        shell: pwsh
+        run: |
+          Set-Location "$env:RUNNER_TEMP\proof-source"
+          git checkout --detach "$env:BEFORE_SHA"
+          corepack enable
+          $packageManager = node -p "require('./package.json').packageManager"
+          corepack prepare "$packageManager" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove before fix
+        shell: pwsh
+        run: |
+          Set-Location "$env:RUNNER_TEMP\proof-source"
+          $proofRoot = "$env:RUNNER_TEMP\proof\before"
+          New-Item -ItemType Directory -Force -Path "$proofRoot\home" | Out-Null
+          $env:HOME = "$proofRoot\home"
+          $env:USERPROFILE = "$proofRoot\home"
+          $env:OPENCLAW_STATE_DIR = "$proofRoot\state"
+          $env:OPENCLAW_CONFIG_PATH = "$proofRoot\config.json"
+          '{}' | Out-File -FilePath "$env:OPENCLAW_CONFIG_PATH" -Encoding utf8
+
+          @'
+          import { evaluateShellAllowlistWithAuthorization } from "./src/infra/exec-approvals-allowlist.ts";
+          import { isWindowsPlatform } from "./src/infra/windows-shell-command.ts";
+
+          console.log(`[proof] platform=${process.platform}`);
+          console.log(`[proof] isWindowsPlatform()=${isWindowsPlatform()}`);
+
+          const result = await evaluateShellAllowlistWithAuthorization({
+            command: "dir",
+            allowlist: [],
+            safeBins: new Set(),
+          });
+
+          console.log(`[proof] analysisOk=${result.analysisOk}`);
+          console.log(`[proof] allowlistSatisfied=${result.allowlistSatisfied}`);
+          console.log(`[proof] hasAuthorizationPlan=${"authorizationPlan" in result}`);
+          console.log(`[proof] segmentCount=${result.segments?.length ?? 0}`);
+          console.log(`[proof] scene=windows-omitted-platform before=expected-bug-reproduced`);
+          '@ | Out-File -FilePath "proof.mts" -Encoding utf8
+
+          node --import tsx proof.mts 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\proof-source\proof-before.log"
+
+          # Verify the bug is reproduced on Windows: isWindowsPlatform() must be false
+          # and the authorization path must include an authorizationPlan.
+          $log = Get-Content "$env:RUNNER_TEMP\proof-source\proof-before.log" -Raw
+          if ($log -notmatch "isWindowsPlatform\(\)=false") {
+            Write-Error "BUG NOT REPRODUCED: isWindowsPlatform() was not false before the fix on Windows"
+            exit 1
+          }
+          if ($log -notmatch "hasAuthorizationPlan=true") {
+            Write-Error "BUG NOT REPRODUCED: expected POSIX authorization path (authorizationPlan present) before the fix"
+            exit 1
+          }
+
+      - name: Install dependencies (after)
+        shell: pwsh
+        run: |
+          Set-Location "$env:RUNNER_TEMP\proof-source"
+          git checkout --detach "$env:AFTER_SHA"
+          pnpm install --frozen-lockfile
+
+      - name: Prove after fix
+        shell: pwsh
+        run: |
+          Set-Location "$env:RUNNER_TEMP\proof-source"
+          $proofRoot = "$env:RUNNER_TEMP\proof\after"
+          New-Item -ItemType Directory -Force -Path "$proofRoot\home" | Out-Null
+          $env:HOME = "$proofRoot\home"
+          $env:USERPROFILE = "$proofRoot\home"
+          $env:OPENCLAW_STATE_DIR = "$proofRoot\state"
+          $env:OPENCLAW_CONFIG_PATH = "$proofRoot\config.json"
+          '{}' | Out-File -FilePath "$env:OPENCLAW_CONFIG_PATH" -Encoding utf8
+
+          @'
+          import { evaluateShellAllowlistWithAuthorization } from "./src/infra/exec-approvals-allowlist.ts";
+          import { isWindowsPlatform } from "./src/infra/windows-shell-command.ts";
+
+          console.log(`[proof] platform=${process.platform}`);
+          console.log(`[proof] isWindowsPlatform()=${isWindowsPlatform()}`);
+
+          const result = await evaluateShellAllowlistWithAuthorization({
+            command: "dir",
+            allowlist: [],
+            safeBins: new Set(),
+          });
+
+          console.log(`[proof] analysisOk=${result.analysisOk}`);
+          console.log(`[proof] allowlistSatisfied=${result.allowlistSatisfied}`);
+          console.log(`[proof] hasAuthorizationPlan=${"authorizationPlan" in result}`);
+          console.log(`[proof] segmentCount=${result.segments?.length ?? 0}`);
+          console.log(`[proof] scene=windows-omitted-platform after=expected-fix-verified`);
+          '@ | Out-File -FilePath "proof.mts" -Encoding utf8
+
+          node --import tsx proof.mts 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\proof-source\proof-after.log"
+
+          # Verify the fix on Windows: isWindowsPlatform() must be true and the
+          # Windows analysis path must be taken (no authorizationPlan from POSIX planning).
+          $log = Get-Content "$env:RUNNER_TEMP\proof-source\proof-after.log" -Raw
+          if ($log -notmatch "isWindowsPlatform\(\)=true") {
+            Write-Error "FIX NOT VERIFIED: isWindowsPlatform() was not true after the fix on Windows"
+            exit 1
+          }
+          if ($log -notmatch "hasAuthorizationPlan=false") {
+            Write-Error "FIX NOT VERIFIED: expected Windows analysis path (no authorizationPlan) after the fix"
+            exit 1
+          }
+          if ($log -notmatch "segmentCount=1") {
+            Write-Error "FIX NOT VERIFIED: expected one analyzed segment from Windows analysis after the fix"
+            exit 1
+          }
+
+      - name: Consolidate proof logs
+        if: always()
+        shell: pwsh
+        run: |
+          Set-Location "$env:RUNNER_TEMP\proof-source"
+          $summary = @"
+          === Proof summary ===
+          Before SHA: $env:BEFORE_SHA
+          After SHA: $env:AFTER_SHA
+          Runner OS: $env:RUNNER_OS
+          "@
+          $summary | Out-File -FilePath proof.log -Encoding utf8
+          if (Test-Path proof-before.log) {
+            "`n--- BEFORE ---" | Out-File -FilePath proof.log -Append -Encoding utf8
+            Get-Content proof-before.log | Out-File -FilePath proof.log -Append -Encoding utf8
+          }
+          if (Test-Path proof-after.log) {
+            "`n--- AFTER ---" | Out-File -FilePath proof.log -Append -Encoding utf8
+            Get-Content proof-after.log | Out-File -FilePath proof.log -Append -Encoding utf8
+          }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-issue-133311-windows-platform
+          path: ${{ runner.temp }}\proof-source\proof*.log
+          retention-days: 30
