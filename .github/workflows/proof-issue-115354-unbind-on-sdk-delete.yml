@@ -1,0 +1,119 @@
+name: Proof issue 115354 unbind on SDK session delete
+
+on:
+  push:
+    branches: [fix/issue-115354-unbind-on-sdk-delete-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: 4bf8432af0364cf937f35b6b44d0920faed4e0e8
+      AFTER_SHA: e7f29edba41decbe14970c42a993c33ec62dd662
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      - name: Checkout proof branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: fix/issue-115354-unbind-on-sdk-delete-proof
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove before fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp "$GITHUB_WORKSPACE/scripts/proof-issue-115354-unbind-on-sdk-delete.mts" scripts/proof-issue-115354-unbind-on-sdk-delete.mts
+          proof_root="$RUNNER_TEMP/proof/before"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+
+          echo "=== BEFORE proof: expecting stale binding to survive ===" | tee -a "$RUNNER_TEMP/proof-source/proof.log"
+          PROOF_SCENE=before PROOF_EXPECTATION=before \
+            node --import ./scripts/tsx.mjs scripts/proof-issue-115354-unbind-on-sdk-delete.mts 2>&1 | tee -a "$RUNNER_TEMP/proof-source/proof.log"
+
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+
+      - name: Prove after fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp "$GITHUB_WORKSPACE/scripts/proof-issue-115354-unbind-on-sdk-delete.mts" scripts/proof-issue-115354-unbind-on-sdk-delete.mts
+          proof_root="$RUNNER_TEMP/proof/after"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+
+          echo "=== AFTER proof: expecting binding to be removed ===" | tee -a "$RUNNER_TEMP/proof-source/proof.log"
+          PROOF_SCENE=after PROOF_EXPECTATION=after \
+            node --import ./scripts/tsx.mjs scripts/proof-issue-115354-unbind-on-sdk-delete.mts 2>&1 | tee -a "$RUNNER_TEMP/proof-source/proof.log"
+
+      - name: Run regression test on PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          echo "=== Regression test: session-store-runtime.unbind-on-delete ===" | tee -a "$RUNNER_TEMP/proof-source/proof.log"
+          node scripts/run-vitest.mjs run src/plugin-sdk/session-store-runtime.unbind-on-delete.test.ts 2>&1 | tee -a "$RUNNER_TEMP/proof-source/proof.log"
+
+      - name: Verify proof markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          echo "=== Proof markers ===" | tee -a proof.log
+          grep -E '^\[proof\]' proof.log | tee -a proof.log || true
+          grep -E '^\[proof\].*status=pass.*expectation=before.*stale_binding_survived=true' proof.log
+          grep -E '^\[proof\].*status=pass.*expectation=after.*binding_removed=true' proof.log
+          grep -E '^\[proof\].*scene=partial-cleanup.*status=pass.*converged=true' proof.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-issue-115354-unbind-on-sdk-delete
+          path: ${{ runner.temp }}/proof-source/proof.log
+          retention-days: 30
