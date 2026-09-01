@@ -1,0 +1,170 @@
+name: Proof sqlite-wal monotonic deadline
+
+on:
+  push:
+    branches: [fix/gap-sqlite-wal-monotonic-deadline-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: Real SQLite WAL lock recovery under wall-clock jump
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: 3efcee178169801fd58bb03079eeb22ff1dca03a
+      AFTER_SHA: 39af5cc35074b847dd4265fb8375018942140ef0
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Write real-lock proof script
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/proof-source/proof-wal-real-lock.mts" <<'EOF'
+          import { DatabaseSync } from "node:sqlite";
+          import path from "node:path";
+          import { configureSqliteConnectionPragmas } from "./src/infra/sqlite-wal.js";
+
+          const expectError = process.argv.includes("--expect-error");
+          const phase = expectError ? "before" : "after";
+          const busyTimeoutMs = 500;
+
+          const proofRoot = process.env.PROOF_ROOT ?? path.join(process.cwd(), ".tmp/proof");
+          const dbPath = path.join(proofRoot, "test.sqlite");
+          const db = new DatabaseSync(dbPath);
+
+          // Intercept the first WAL enable attempt so the retry loop is exercised.
+          // The second attempt runs against the real SQLite database.
+          const originalExec = db.exec.bind(db);
+          let walAttempts = 0;
+          const originalDateNow = Date.now;
+          db.exec = (sql: string) => {
+            if (sql === "PRAGMA journal_mode = WAL;" && walAttempts++ === 0) {
+              // Simulate a forward wall-clock jump inside the retry window.
+              Date.now = () => originalDateNow() + 1_000_000;
+              throw Object.assign(new Error("database is locked"), {
+                code: "ERR_SQLITE_ERROR",
+                errcode: 5,
+              });
+            }
+            return originalExec(sql);
+          };
+
+          const startMs = performance.now();
+          let threw = false;
+          let errorMessage = "";
+          try {
+            configureSqliteConnectionPragmas(db, { busyTimeoutMs });
+          } catch (error) {
+            threw = true;
+            errorMessage = error instanceof Error ? error.message : String(error);
+          }
+          const elapsedMs = performance.now() - startMs;
+
+          db.close();
+
+          if (expectError) {
+            if (threw) {
+              console.log(`[proof] scene=wal-lock-recovery status=pass phase=${phase} behavior=threw message=${JSON.stringify(errorMessage)} elapsedMs=${elapsedMs.toFixed(2)}`);
+              process.exit(0);
+            } else {
+              console.log(`[proof] scene=wal-lock-recovery status=fail phase=${phase} behavior=success expected=threw elapsedMs=${elapsedMs.toFixed(2)}`);
+              process.exit(1);
+            }
+          } else {
+            if (!threw) {
+              console.log(`[proof] scene=wal-lock-recovery status=pass phase=${phase} behavior=success walAttempts=${walAttempts} elapsedMs=${elapsedMs.toFixed(2)}`);
+              process.exit(0);
+            } else {
+              console.log(`[proof] scene=wal-lock-recovery status=fail phase=${phase} behavior=threw message=${JSON.stringify(errorMessage)} elapsedMs=${elapsedMs.toFixed(2)}`);
+              process.exit(1);
+            }
+          }
+          EOF
+
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove before fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          proof_root="$RUNNER_TEMP/proof/before"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          export PROOF_ROOT="$proof_root"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR" "$(dirname "$OPENCLAW_CONFIG_PATH")"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          node --import ./scripts/tsx.mjs proof-wal-real-lock.mts --expect-error 2>&1 | tee -a proof.log
+
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Prove after fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          proof_root="$RUNNER_TEMP/proof/after"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          export PROOF_ROOT="$proof_root"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR" "$(dirname "$OPENCLAW_CONFIG_PATH")"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          node --import ./scripts/tsx.mjs proof-wal-real-lock.mts 2>&1 | tee -a proof.log
+
+      - name: Summarize proof markers
+        shell: bash
+        if: always()
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          echo "=== Proof markers ==="
+          grep -E '^\[proof\]' proof.log || true
+          pass_count=$(grep -cE '^\[proof\] scene=wal-lock-recovery status=pass' proof.log || true)
+          if [ "$pass_count" -ne 2 ]; then
+            echo "Expected 2 pass markers, found $pass_count"
+            exit 1
+          fi
+          echo "All proof scenarios passed."
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-gap-sqlite-wal-monotonic-deadline
+          path: ${{ runner.temp }}/proof-source/proof.log
+          retention-days: 30
