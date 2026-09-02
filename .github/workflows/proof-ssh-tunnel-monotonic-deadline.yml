@@ -1,0 +1,264 @@
+name: Proof SSH tunnel monotonic deadline
+
+on:
+  push:
+    branches: [fix/gap-ssh-tunnel-monotonic-deadline-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BEFORE_SHA: f1fb06eef9b46b55359f27451c10f0ba0996b534
+      AFTER_SHA: 20fa5557cb1c7dc10feb3c9a5ee26de18abf8da4
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Ensure OpenSSH client is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y openssh-client
+          fi
+          ssh -V
+
+      # ① Fetch the two immutable SHAs from the upstream repository.
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Write proof harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/proof-skew.mts" <<'SCRIPT'
+          import { spawnSync } from "node:child_process";
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+          import { startSshPortForward } from "./src/infra/ssh-tunnel.js";
+
+          const proofSha = process.env.PROOF_SHA ?? "unknown";
+
+          async function main() {
+            const home = path.join(os.tmpdir(), `openclaw-proof-home-${proofSha}-${process.pid}`);
+            fs.mkdirSync(path.join(home, ".ssh"), { recursive: true });
+            process.env.HOME = home;
+
+            // Generate a host key for the non-routable target so the production
+            // StrictHostKeyChecking=yes path accepts it without prompting.
+            const keyFile = path.join(os.tmpdir(), `openclaw-fake-host-key-${process.pid}`);
+            spawnSync("ssh-keygen", ["-t", "ed25519", "-f", keyFile, "-N", "", "-C", "openclaw-proof"], {
+              stdio: "ignore",
+            });
+            const pubKey = fs.readFileSync(`${keyFile}.pub`, "utf8").trim();
+            fs.writeFileSync(path.join(home, ".ssh", "known_hosts"), `192.0.2.1 ${pubKey}\n`);
+
+            const scenarios = [
+              {
+                name: "forward-skew",
+                dateNow: (() => {
+                  let n = 0;
+                  const base = 1_000_000;
+                  return () => {
+                    n += 1;
+                    return n <= 1 ? base : base + 10_000;
+                  };
+                })(),
+              },
+              {
+                name: "backward-skew",
+                dateNow: () => 1_000_000 - 10_000,
+              },
+            ] as const;
+
+            for (const scenario of scenarios) {
+              const realDateNow = Date.now;
+              Date.now = scenario.dateNow;
+              const started = performance.now();
+              let duration = -1;
+              let outcome: "rejected" | "resolved" | "hang" = "hang";
+              let errorMsg = "";
+              try {
+                const safety = new Promise<never>((_, reject) => {
+                  setTimeout(() => reject(new Error("HANG-SAFETY-TIMEOUT")), 1500);
+                });
+                const tunnel = await Promise.race([
+                  startSshPortForward({
+                    target: "192.0.2.1:2222",
+                    localPortPreferred: 43000,
+                    remotePort: 18789,
+                    timeoutMs: 250,
+                  }),
+                  safety,
+                ]);
+                outcome = "resolved";
+                await tunnel.stop();
+              } catch (err) {
+                if (err instanceof Error && err.message === "HANG-SAFETY-TIMEOUT") {
+                  outcome = "hang";
+                  errorMsg = "did not resolve or reject within safety window";
+                } else {
+                  outcome = "rejected";
+                  errorMsg = err instanceof Error ? err.message : String(err);
+                }
+              } finally {
+                duration = performance.now() - started;
+                Date.now = realDateNow;
+              }
+              const safeError = errorMsg.replace(/"/g, "'").replace(/\s+/g, " ");
+              console.log(`[proof] sha=${proofSha} scene=${scenario.name} outcome=${outcome} duration_ms=${Math.round(duration)} error="${safeError}"`);
+            }
+          }
+
+          main().catch((err) => {
+            console.error(err);
+            process.exit(1);
+          });
+          SCRIPT
+
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      # ② Reproduce the pre-fix behavior using the real production boundary:
+      #    real ssh binary, real net.connect probes, real timers, and manipulated
+      #    Date.now() to simulate wall-clock jumps.
+      - name: Prove before fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          proof_root="$RUNNER_TEMP/proof/before"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          export PROOF_SHA=before
+          cp "$RUNNER_TEMP/proof-skew.mts" ./proof-skew.mts
+          echo "=== BEFORE $BEFORE_SHA ===" | tee -a "$RUNNER_TEMP/proof.log"
+          pnpm exec tsx ./proof-skew.mts | tee -a "$RUNNER_TEMP/proof.log"
+
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      # ③ Verify the post-fix behavior under the same real production boundary.
+      - name: Prove after fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          proof_root="$RUNNER_TEMP/proof/after"
+          export HOME="$proof_root/home"
+          export OPENCLAW_STATE_DIR="$proof_root/state"
+          export OPENCLAW_CONFIG_PATH="$proof_root/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+          echo '{}' > "$OPENCLAW_CONFIG_PATH"
+          export PROOF_SHA=after
+          cp "$RUNNER_TEMP/proof-skew.mts" ./proof-skew.mts
+          echo "=== AFTER $AFTER_SHA ===" | tee -a "$RUNNER_TEMP/proof.log"
+          pnpm exec tsx ./proof-skew.mts | tee -a "$RUNNER_TEMP/proof.log"
+
+      - name: Run regression tests (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          echo "=== REGRESSION TESTS $AFTER_SHA ===" | tee -a "$RUNNER_TEMP/proof.log"
+          pnpm test src/infra/ssh-tunnel.test.ts --run | tee -a "$RUNNER_TEMP/proof.log"
+
+      # ④ Validate that the markers show the expected before/after difference.
+      - name: Validate proof markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== VALIDATION ===" | tee -a "$RUNNER_TEMP/proof.log"
+          node - <<'VALIDATE'
+          const fs = require('fs');
+          const logPath = process.env.RUNNER_TEMP + '/proof.log';
+          const log = fs.readFileSync(logPath, 'utf8');
+          const lines = log.split('\n').filter(l => l.startsWith('[proof]'));
+          const rows = lines.map(l => {
+            const obj = {};
+            for (const m of l.matchAll(/(\w+)=([^\s]+)/g)) {
+              obj[m[1]] = m[2];
+            }
+            return obj;
+          });
+
+          function find(sha, scene) {
+            return rows.find(r => r.sha === sha && r.scene === scene);
+          }
+
+          function assert(cond, msg) {
+            if (!cond) {
+              console.error('ASSERTION FAILED:', msg);
+              process.exit(1);
+            }
+          }
+
+          const beforeForward = find('before', 'forward-skew');
+          const beforeBackward = find('before', 'backward-skew');
+          const afterForward = find('after', 'forward-skew');
+          const afterBackward = find('after', 'backward-skew');
+
+          assert(beforeForward, 'missing before forward-skew marker');
+          assert(beforeBackward, 'missing before backward-skew marker');
+          assert(afterForward, 'missing after forward-skew marker');
+          assert(afterBackward, 'missing after backward-skew marker');
+
+          // Pre-fix: forward wall-clock step caused an immediate timeout.
+          assert(beforeForward.outcome === 'rejected', 'before forward-skew should reject');
+          assert(Number(beforeForward.duration_ms) < 200, `before forward-skew rejected too late: ${beforeForward.duration_ms}ms`);
+
+          // Pre-fix: backward wall-clock step made the loop poll forever.
+          assert(beforeBackward.outcome === 'hang', 'before backward-skew should hang on wall-clock budget');
+
+          // Post-fix: monotonic deadline waits for the real budget in both directions.
+          assert(afterForward.outcome === 'rejected', 'after forward-skew should reject');
+          assert(Number(afterForward.duration_ms) >= 200, `after forward-skew rejected too early: ${afterForward.duration_ms}ms`);
+          assert(afterBackward.outcome === 'rejected', 'after backward-skew should reject');
+          assert(Number(afterBackward.duration_ms) >= 200, `after backward-skew rejected too early: ${afterBackward.duration_ms}ms`);
+
+          console.log('[proof] validation=passed');
+          VALIDATE
+          echo "[proof] validation=passed" | tee -a "$RUNNER_TEMP/proof.log"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-ssh-tunnel-monotonic-deadline
+          path: ${{ runner.temp }}/proof.log
+          retention-days: 30
