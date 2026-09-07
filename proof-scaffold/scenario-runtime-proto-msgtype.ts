@@ -26,9 +26,11 @@ import {
 } from "./scenario-runtime-shared.js";
 import type { MatrixQaScenarioExecution } from "./scenario-types.js";
 
-// Exact markers the pre-fix inherited-property lookup injected into agent text.
+// Exact markers the pre-fix inherited-property lookup injected into agent text:
+// "toString" resolves to Object.prototype.toString, "__proto__" to the
+// Object.prototype object itself.
 const CORRUPTED_MARKERS = [
-  "[matrix function Object() { [native code] } attachment]",
+  "[matrix function toString() { [native code] } attachment]",
   "[matrix [object Object] attachment]",
 ] as const;
 const CONTROL_ATTACHMENT_MARKER = "[matrix image attachment]";

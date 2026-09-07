@@ -149,7 +149,8 @@ jobs:
             fail=1
           fi
           check before-corrupted "$before" "corrupted media markers reached the recorded model input"
-          check before-corrupted-marker "$before" "[matrix function Object()"
+          check before-corrupted-marker "$before" "[matrix function toString() { [native code] } attachment]"
+          check before-corrupted-marker-proto "$before" "[matrix [object Object] attachment]"
 
           # AFTER must pass the same scenario cleanly.
           after_exit="$(tr -d '[:space:]' < "$after/lane-exit.txt")"
@@ -162,12 +163,18 @@ jobs:
           check after-thread-context "$after" "scene=thread-context status=pass"
           check after-control-image "$after" "scene=control-image status=pass"
 
-          # The corrupted marker must appear nowhere in the after artifacts.
-          if grep -rqF "[matrix function Object()" "$after"; then
-            echo "[proof] scene=after-clean status=FAIL detail=corrupted marker present after fix"
-            fail=1
-          else
+          # The corrupted markers must appear nowhere in the after artifacts.
+          after_clean=0
+          for marker in "[matrix function toString() { [native code] } attachment]" "[matrix [object Object] attachment]"; do
+            if grep -rqF "$marker" "$after"; then
+              echo "[proof] scene=after-clean status=FAIL detail=corrupted marker present after fix: $marker"
+              after_clean=1
+            fi
+          done
+          if [[ "$after_clean" -eq 0 ]]; then
             echo "[proof] scene=after-clean status=pass detail=no corrupted marker after fix"
+          else
+            fail=1
           fi
 
           if [[ "$fail" -ne 0 ]]; then
