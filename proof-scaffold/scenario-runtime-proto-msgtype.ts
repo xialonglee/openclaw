@@ -6,9 +6,11 @@
 // `[matrix [object Object] attachment]`-style media marker. This scenario sends
 // hostile msgtype events to a real disposable homeserver, lets the SUT gateway
 // ingest them through the normal matrix-js-sdk sync monitor path, and then
-// reads the agent transcript through the gateway to assert exactly what text
-// reached the model.
+// asserts on the exact model-facing text the mock provider recorded for the
+// agent turn (the transcript display projection strips supplemental quote
+// context, so the provider request is the authoritative agent-view surface).
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
 import { requestMatrixJson } from "../substrate/request.js";
 import { resolveMatrixQaScenarioRoomId } from "./scenario-contract.js";
 import { createMatrixQaSplitColorImagePng } from "./scenario-media-fixtures.js";
@@ -55,27 +57,46 @@ async function sendRawRoomMessage(params: {
   return eventId;
 }
 
-async function readRoomAgentTranscript(context: MatrixQaScenarioContext, roomId: string) {
-  if (!context.gatewayCall) {
-    throw new Error("Matrix prototype-msgtype scenario requires Gateway call support");
+// The mock provider records every model request; its allInputText is the exact
+// agent-facing text for the turn. The provider base URL is only written into
+// the gateway config, so read it back from the QA gateway config the harness
+// provisioned (same workspace, no secrets in it).
+async function readMockProviderInputText(context: MatrixQaScenarioContext): Promise<string> {
+  const configPath = context.gatewayRuntimeEnv?.OPENCLAW_CONFIG_PATH;
+  if (!configPath) {
+    throw new Error("Matrix prototype-msgtype scenario requires the QA gateway config path");
   }
-  const listed = await context.gatewayCall("sessions.list", {}, { timeoutMs: 10_000 });
-  const sessionKeys = [
-    ...new Set(
-      [...JSON.stringify(listed).matchAll(/agent:[A-Za-z0-9_-]+:matrix:channel:[^"\\]+/g)].map(
-        (match) => match[0],
-      ),
-    ),
-  ];
-  const sessionKey = sessionKeys.find((key) => key.includes(roomId));
-  if (!sessionKey) {
-    throw new Error(`no matrix channel session found for room ${roomId}`);
+  const parsed: unknown = JSON.parse(await fs.readFile(configPath, "utf8"));
+  const baseUrl =
+    typeof parsed === "object" && parsed !== null
+      ? (parsed as { models?: { providers?: { openai?: { baseUrl?: unknown } } } }).models
+          ?.providers?.openai?.baseUrl
+      : undefined;
+  if (typeof baseUrl !== "string" || !baseUrl) {
+    throw new Error("mock provider baseUrl missing from QA gateway config");
   }
-  return await context.gatewayCall(
-    "chat.history",
-    { limit: 50, sessionKey },
-    { timeoutMs: 10_000 },
-  );
+  const mockRoot = baseUrl.replace(/\/v1\/?$/u, "");
+  const response = await fetch(`${mockRoot}/debug/requests`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) {
+    throw new Error(`mock provider /debug/requests returned status ${response.status}`);
+  }
+  const requests: unknown = await response.json();
+  if (!Array.isArray(requests)) {
+    throw new Error("mock provider /debug/requests returned a non-array payload");
+  }
+  return requests
+    .map((request) =>
+      typeof request === "object" && request !== null
+        ? String((request as { allInputText?: unknown }).allInputText ?? "")
+        : "",
+    )
+    .join("\n");
+}
+
+function inputExcerpt(inputText: string, maxChars = 2000): string {
+  return inputText.length > maxChars ? `${inputText.slice(0, maxChars)}…` : inputText;
 }
 
 export async function runProtoMsgtypeReplyContextScenario(
@@ -85,12 +106,14 @@ export async function runProtoMsgtypeReplyContextScenario(
   const { client, startSince } = await primeMatrixQaDriverScenarioClient(context);
   const details = [`room id: ${roomId}`];
   const driverEventIds: string[] = [];
+  const hostileBodies: string[] = [];
   let since = startSince;
 
   for (const testCase of PROTO_MSGTYPE_CASES) {
     // The QA text client pins msgtype=m.text; hostile msgtypes must be sent raw
     // so the SUT monitor sees exactly what a remote peer would deliver.
     const hostileBody = `PROTOMSGTYPE ${testCase.label} body ${buildMatrixQaToken("PROTOBODY")}`;
+    hostileBodies.push(hostileBody);
     const hostileEventId = await sendRawRoomMessage({
       accessToken: context.driverAccessToken,
       baseUrl: context.baseUrl,
@@ -164,26 +187,35 @@ export async function runProtoMsgtypeReplyContextScenario(
     startSince,
   });
 
-  // Assert on the transcript the gateway actually delivered to the agent: the
-  // reply-context quote of each hostile event must be plain text, while the
-  // control image must keep its attachment marker.
-  const transcript = JSON.stringify(await readRoomAgentTranscript(context, roomId));
-  const foundCorrupted = CORRUPTED_MARKERS.filter((marker) => transcript.includes(marker));
+  // Assert on the exact text the gateway sent to the model for the agent
+  // turns: the reply-context quote of each hostile event must be plain text,
+  // while the control image must keep its attachment marker.
+  const inputText = await readMockProviderInputText(context);
+  details.push(`[proof] provider-requests bytes=${inputText.length}`);
+  const missingProbe = [...hostileBodies, controlCaption].filter(
+    (text) => !inputText.includes(text),
+  );
+  if (missingProbe.length > 0) {
+    throw new Error(
+      `[proof] scene=provider-requests status=FAIL probe bodies missing from recorded model input: ${missingProbe.join(" | ")}; excerpt=${inputExcerpt(inputText)}`,
+    );
+  }
+  const foundCorrupted = CORRUPTED_MARKERS.filter((marker) => inputText.includes(marker));
   if (foundCorrupted.length > 0) {
     throw new Error(
-      `[proof] scene=reply-context status=FAIL corrupted media markers reached the agent transcript: ${foundCorrupted.join(" | ")}`,
+      `[proof] scene=reply-context status=FAIL corrupted media markers reached the recorded model input: ${foundCorrupted.join(" | ")}`,
     );
   }
-  if (!transcript.includes(CONTROL_ATTACHMENT_MARKER)) {
+  if (!inputText.includes(CONTROL_ATTACHMENT_MARKER)) {
     throw new Error(
-      `[proof] scene=control-image status=FAIL missing attachment marker ${CONTROL_ATTACHMENT_MARKER} in agent transcript`,
+      `[proof] scene=control-image status=FAIL missing attachment marker ${CONTROL_ATTACHMENT_MARKER} in recorded model input; excerpt=${inputExcerpt(inputText)}`,
     );
   }
   details.push(
-    "[proof] scene=reply-context status=pass prototype-named msgtypes stayed plain text in agent reply context",
+    "[proof] scene=reply-context status=pass prototype-named msgtypes stayed plain text in recorded model input",
   );
   details.push(
-    `[proof] scene=control-image status=pass marker=${CONTROL_ATTACHMENT_MARKER} present in agent reply context`,
+    `[proof] scene=control-image status=pass marker=${CONTROL_ATTACHMENT_MARKER} present in recorded model input`,
   );
 
   return {

@@ -148,7 +148,7 @@ jobs:
             echo "[proof] scene=before-lane status=FAIL detail=before lane unexpectedly passed"
             fail=1
           fi
-          check before-corrupted "$before" "corrupted media markers reached the agent transcript"
+          check before-corrupted "$before" "corrupted media markers reached"
           check before-corrupted-marker "$before" "[matrix function Object()"
 
           # AFTER must pass the same scenario cleanly.
@@ -160,7 +160,7 @@ jobs:
             fail=1
           fi
           check after-reply-context "$after" "scene=reply-context"
-          check after-reply-context-pass "$after" "prototype-named msgtypes stayed plain text in agent reply context"
+          check after-reply-context-pass "$after" "prototype-named msgtypes stayed plain text in recorded model input"
           check after-control-image "$after" "scene=control-image status=pass"
 
           # The corrupted marker must appear nowhere in the after artifacts.
