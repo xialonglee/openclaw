@@ -84,7 +84,7 @@ jobs:
         run: |
           set -uo pipefail
           cd "$RUNNER_TEMP/proof-source"
-          output_dir="$RUNNER_TEMP/qa-out"
+          output_dir=".artifacts/proof-qa-${{ matrix.name }}"
           mkdir -p "$output_dir"
           OPENCLAW_QA_REDACT_PUBLIC_METADATA=1 pnpm openclaw qa matrix \
             --repo-root . \
@@ -106,7 +106,7 @@ jobs:
           path: |
             ${{ runner.temp }}/qa-lane.log
             ${{ runner.temp }}/lane-exit.txt
-            ${{ runner.temp }}/qa-out
+            ${{ runner.temp }}/proof-source/.artifacts/proof-qa-${{ matrix.name }}
           retention-days: 30
 
   verdict:
