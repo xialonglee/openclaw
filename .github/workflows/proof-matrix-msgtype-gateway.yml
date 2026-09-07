@@ -1,0 +1,178 @@
+name: Proof matrix msgtype gateway flow
+
+on:
+  push:
+    branches: [fix/gap-matrix-msgtype-proto-keys-proof]
+
+permissions: {}
+
+env:
+  BEFORE_SHA: f9f4aa93646e74a0b63ae667d1d57ed5455f7e07
+  AFTER_SHA: 6f7efd2caea7d34a60b2a2b44b2d45bbfb982afa
+  CI: true
+  OPENCLAW_SKIP_UPDATE_CHECK: 1
+  OPENCLAW_BUILD_PRIVATE_QA: "1"
+  OPENCLAW_ENABLE_PRIVATE_QA_CLI: "1"
+
+jobs:
+  prove:
+    name: prove ${{ matrix.name }} (${{ matrix.short }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: before
+            short: f9f4aa93
+            sha: f9f4aa93646e74a0b63ae667d1d57ed5455f7e07
+          - name: after
+            short: 6f7efd2c
+            sha: 6f7efd2caea7d34a60b2a2b44b2d45bbfb982afa
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init -q
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "${{ matrix.sha }}"
+          git checkout -q --detach FETCH_HEAD
+
+      - name: Apply proof scaffold
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/proof-source"
+          cp "$GITHUB_WORKSPACE/proof-scaffold/scenario-runtime-proto-msgtype.ts" \
+            "$src/extensions/qa-lab/src/live-transports/matrix/scenarios/"
+          cp "$GITHUB_WORKSPACE/proof-scaffold/matrix-proto-msgtype-reply-context.yaml" \
+            "$src/qa/scenarios/channels/"
+          git -C "$src" apply "$GITHUB_WORKSPACE/proof-scaffold/scenario-flow-runner.patch"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      - name: Build
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          pnpm build
+
+      - name: Run matrix live QA scenario
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          output_dir="$RUNNER_TEMP/qa-out"
+          mkdir -p "$output_dir"
+          OPENCLAW_QA_REDACT_PUBLIC_METADATA=1 pnpm openclaw qa matrix \
+            --repo-root . \
+            --output-dir "$output_dir" \
+            --scenario matrix-proto-msgtype-reply-context \
+            --provider-mode mock-openai \
+            --model mock-openai/gpt-5.6-luna \
+            --alt-model mock-openai/gpt-5.6-luna-alt \
+            --fast 2>&1 | tee "$RUNNER_TEMP/qa-lane.log"
+          lane_exit=${PIPESTATUS[0]}
+          echo "$lane_exit" > "$RUNNER_TEMP/lane-exit.txt"
+          echo "lane_exit=$lane_exit"
+          exit 0
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/qa-lane.log
+            ${{ runner.temp }}/lane-exit.txt
+            ${{ runner.temp }}/qa-out
+          retention-days: 30
+
+  verdict:
+    name: verdict
+    runs-on: ubuntu-24.04
+    needs: [prove]
+    if: always()
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: proof-*
+          path: ${{ runner.temp }}/proof-artifacts
+
+      - name: Verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${{ runner.temp }}/proof-artifacts"
+          fail=0
+          check() {
+            local scene="$1" file="$2" pattern="$3"
+            if grep -rqF "$pattern" "$file"; then
+              echo "[proof] scene=$scene status=pass detail=$pattern"
+            else
+              echo "[proof] scene=$scene status=FAIL expected in $file: $pattern"
+              fail=1
+            fi
+          }
+
+          before="$root/proof-before"
+          after="$root/proof-after"
+
+          # BEFORE must reproduce the bug for the intended reason: the scenario
+          # detected corrupted media markers in the agent transcript.
+          before_exit="$(tr -d '[:space:]' < "$before/lane-exit.txt")"
+          if [[ "$before_exit" != "0" ]]; then
+            echo "[proof] scene=before-lane status=pass detail=lane exited $before_exit (bug reproduced)"
+          else
+            echo "[proof] scene=before-lane status=FAIL detail=before lane unexpectedly passed"
+            fail=1
+          fi
+          check before-corrupted "$before" "corrupted media markers reached the agent transcript"
+          check before-corrupted-marker "$before" "[matrix function Object()"
+
+          # AFTER must pass the same scenario cleanly.
+          after_exit="$(tr -d '[:space:]' < "$after/lane-exit.txt")"
+          if [[ "$after_exit" == "0" ]]; then
+            echo "[proof] scene=after-lane status=pass detail=lane exited 0 (fix verified)"
+          else
+            echo "[proof] scene=after-lane status=FAIL detail=after lane exited $after_exit"
+            fail=1
+          fi
+          check after-reply-context "$after" "scene=reply-context"
+          check after-reply-context-pass "$after" "prototype-named msgtypes stayed plain text in agent reply context"
+          check after-control-image "$after" "scene=control-image status=pass"
+
+          # The corrupted marker must appear nowhere in the after artifacts.
+          if grep -rqF "[matrix function Object()" "$after"; then
+            echo "[proof] scene=after-clean status=FAIL detail=corrupted marker present after fix"
+            fail=1
+          else
+            echo "[proof] scene=after-clean status=pass detail=no corrupted marker after fix"
+          fi
+
+          if [[ "$fail" -ne 0 ]]; then
+            echo "[proof] VERDICT: FAIL"
+            exit 1
+          fi
+          echo "[proof] VERDICT: PASS"
