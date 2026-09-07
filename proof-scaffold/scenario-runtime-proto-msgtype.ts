@@ -87,11 +87,15 @@ async function readMockProviderInputText(context: MatrixQaScenarioContext): Prom
     throw new Error("mock provider /debug/requests returned a non-array payload");
   }
   return requests
-    .map((request) =>
-      typeof request === "object" && request !== null
-        ? String((request as { allInputText?: unknown }).allInputText ?? "")
-        : "",
-    )
+    .map((request) => {
+      if (typeof request !== "object" || request === null) {
+        return "";
+      }
+      const snapshot = request as { allInputText?: unknown; raw?: unknown };
+      // Scan both the extracted text and the raw wire body: the gateway may
+      // use a non-Responses wire shape whose extracted allInputText is partial.
+      return [String(snapshot.allInputText ?? ""), String(snapshot.raw ?? "")].join("\n");
+    })
     .join("\n");
 }
 
