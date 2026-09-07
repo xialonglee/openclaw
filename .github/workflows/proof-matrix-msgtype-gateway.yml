@@ -86,6 +86,9 @@ jobs:
           cd "$RUNNER_TEMP/proof-source"
           output_dir=".artifacts/proof-qa-${{ matrix.name }}"
           mkdir -p "$output_dir"
+          # GitHub runs bash with -e by default; disable it around the lane so
+          # the failing BEFORE lane still records its exit code for the verdict.
+          set +e
           OPENCLAW_QA_REDACT_PUBLIC_METADATA=1 pnpm openclaw qa matrix \
             --repo-root . \
             --output-dir "$output_dir" \
@@ -95,6 +98,7 @@ jobs:
             --alt-model mock-openai/gpt-5.6-luna-alt \
             --fast 2>&1 | tee "$RUNNER_TEMP/qa-lane.log"
           lane_exit=${PIPESTATUS[0]}
+          set -e
           echo "$lane_exit" > "$RUNNER_TEMP/lane-exit.txt"
           echo "lane_exit=$lane_exit"
           exit 0
