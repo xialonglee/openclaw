@@ -1,19 +1,19 @@
-title: Matrix prototype-named msgtypes stay plain text in live reply context
+title: Matrix prototype-named msgtypes stay plain text in live thread context
 scenario:
-  id: matrix-proto-msgtype-reply-context
+  id: matrix-proto-msgtype-thread-context
   surface: channels
   coverage:
     primary:
       - matrix.message-presentation-metadata
-  objective: Verify that a room message whose remote-controlled msgtype collides with an Object.prototype property name renders as plain text when the gateway resolves reply context for the agent, while a legitimate m.image attachment still renders its attachment marker.
+  objective: Verify that a room message whose remote-controlled msgtype collides with an Object.prototype property name renders as plain text when the gateway summarizes the thread root for the agent, while a legitimate m.image attachment still renders its attachment marker.
   successCriteria:
-    - Hostile-msgtype reply targets reach the agent transcript as plain text without corrupted media markers.
-    - A legitimate m.image reply target still renders the [matrix image attachment] marker in agent-visible reply context.
+    - Hostile-msgtype thread roots reach the recorded model input as plain text without corrupted media markers.
+    - A legitimate m.image thread root still renders the [matrix image attachment] marker in agent-visible thread context.
   docsRefs:
     - docs/channels/matrix.md
   codeRefs:
     - extensions/matrix/src/matrix/media-text.ts
-    - extensions/matrix/src/matrix/monitor/reply-context.ts
+    - extensions/matrix/src/matrix/monitor/thread-context.ts
   execution:
     kind: flow
     channel: matrix
@@ -35,6 +35,6 @@ scenario:
 
 flow:
   module: ./live-transports/matrix/scenarios/scenario-runtime-proto-msgtype.js
-  call: runProtoMsgtypeReplyContextScenario
+  call: runProtoMsgtypeThreadContextScenario
   args:
     - expr: "scenarioContext"

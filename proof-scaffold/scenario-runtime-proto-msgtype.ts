@@ -1,14 +1,16 @@
-// QA Lab Matrix scenario proves prototype-named msgtypes stay plain text in live reply context.
+// QA Lab Matrix scenario proves prototype-named msgtypes stay plain text in live thread context.
 //
 // Remote Matrix peers control msgtype. A room message whose msgtype collides
 // with an Object.prototype property name must stay plain text when the gateway
-// resolves reply context for the agent, not degrade into a corrupted
-// `[matrix [object Object] attachment]`-style media marker. This scenario sends
-// hostile msgtype events to a real disposable homeserver, lets the SUT gateway
-// ingest them through the normal matrix-js-sdk sync monitor path, and then
-// asserts on the exact model-facing text the mock provider recorded for the
-// agent turn (the transcript display projection strips supplemental quote
-// context, so the provider request is the authoritative agent-view surface).
+// summarizes the thread root for the agent, not degrade into a corrupted
+// `[matrix function Object() { [native code] } attachment]`-style media marker.
+// This scenario sends hostile msgtype events to a real disposable homeserver,
+// lets the SUT gateway ingest them through the normal matrix-js-sdk sync
+// monitor path, and then asserts on the exact model-facing text the mock
+// provider recorded for the agent turn. The thread-starter summary is the
+// agent-view surface here: the reply-quote block is skipped when the chat
+// window already covers the reply target, while the thread starter block is
+// always injected when present.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { requestMatrixJson } from "../substrate/request.js";
@@ -17,6 +19,7 @@ import { createMatrixQaSplitColorImagePng } from "./scenario-media-fixtures.js";
 import {
   advanceMatrixQaActorCursor,
   buildMatrixQaToken,
+  buildMentionPrompt,
   isMatrixQaExactMarkerReply,
   primeMatrixQaDriverScenarioClient,
   type MatrixQaScenarioContext,
@@ -57,11 +60,22 @@ async function sendRawRoomMessage(params: {
   return eventId;
 }
 
+type RecordedMockRequest = {
+  cursor?: unknown;
+  model?: unknown;
+  requestKind?: unknown;
+  outcome?: unknown;
+  allInputText?: unknown;
+  raw?: unknown;
+};
+
 // The mock provider records every model request; its allInputText is the exact
 // agent-facing text for the turn. The provider base URL is only written into
 // the gateway config, so read it back from the QA gateway config the harness
 // provisioned (same workspace, no secrets in it).
-async function readMockProviderInputText(context: MatrixQaScenarioContext): Promise<string> {
+async function readMockProviderRequests(
+  context: MatrixQaScenarioContext,
+): Promise<RecordedMockRequest[]> {
   const configPath = context.gatewayRuntimeEnv?.OPENCLAW_CONFIG_PATH;
   if (!configPath) {
     throw new Error("Matrix prototype-msgtype scenario requires the QA gateway config path");
@@ -86,24 +100,29 @@ async function readMockProviderInputText(context: MatrixQaScenarioContext): Prom
   if (!Array.isArray(requests)) {
     throw new Error("mock provider /debug/requests returned a non-array payload");
   }
+  return requests as RecordedMockRequest[];
+}
+
+// Scan both the extracted text and the raw wire body: the gateway may use a
+// non-Responses wire shape whose extracted allInputText is partial.
+function joinRecordedInputText(requests: RecordedMockRequest[]): string {
+  return requests
+    .map((request) => [String(request.allInputText ?? ""), String(request.raw ?? "")].join("\n"))
+    .join("\n");
+}
+
+// Per-request one-line digest so a probe miss is self-explanatory in CI logs.
+function summarizeRecordedRequests(requests: RecordedMockRequest[]): string {
   return requests
     .map((request) => {
-      if (typeof request !== "object" || request === null) {
-        return "";
-      }
-      const snapshot = request as { allInputText?: unknown; raw?: unknown };
-      // Scan both the extracted text and the raw wire body: the gateway may
-      // use a non-Responses wire shape whose extracted allInputText is partial.
-      return [String(snapshot.allInputText ?? ""), String(snapshot.raw ?? "")].join("\n");
+      const text = String(request.allInputText ?? "");
+      const head = text.replace(/\s+/gu, " ").trim().slice(0, 120);
+      return `cursor=${String(request.cursor)} model=${String(request.model)} kind=${String(request.requestKind)} outcome=${String(request.outcome)} inputBytes=${text.length} head=${head}`;
     })
     .join("\n");
 }
 
-function inputExcerpt(inputText: string, maxChars = 2000): string {
-  return inputText.length > maxChars ? `${inputText.slice(0, maxChars)}…` : inputText;
-}
-
-export async function runProtoMsgtypeReplyContextScenario(
+export async function runProtoMsgtypeThreadContextScenario(
   context: MatrixQaScenarioContext,
 ): Promise<MatrixQaScenarioExecution> {
   const roomId = resolveMatrixQaScenarioRoomId(context, "proto");
@@ -115,7 +134,9 @@ export async function runProtoMsgtypeReplyContextScenario(
 
   for (const testCase of PROTO_MSGTYPE_CASES) {
     // The QA text client pins msgtype=m.text; hostile msgtypes must be sent raw
-    // so the SUT monitor sees exactly what a remote peer would deliver.
+    // so the SUT monitor sees exactly what a remote peer would deliver. The
+    // hostile event becomes a thread root so the gateway summarizes it into the
+    // thread-starter block of the agent prompt on the next mention turn.
     const hostileBody = `PROTOMSGTYPE ${testCase.label} body ${buildMatrixQaToken("PROTOBODY")}`;
     hostileBodies.push(hostileBody);
     const hostileEventId = await sendRawRoomMessage({
@@ -125,30 +146,32 @@ export async function runProtoMsgtypeReplyContextScenario(
       msgtype: testCase.msgtype,
       roomId,
     });
-    driverEventIds.push(hostileEventId);
     const token = buildMatrixQaToken("PROTOK");
-    await client.sendTextMessage({
-      body: `${context.sutUserId} prototype msgtype reply-context probe (${testCase.label}): reply with only this exact marker: ${token}`,
+    const triggerEventId = await client.sendTextMessage({
+      body: `${buildMentionPrompt(context.sutUserId, token)} prototype msgtype thread probe (${testCase.label})`,
       mentionUserIds: [context.sutUserId],
-      replyToEventId: hostileEventId,
       roomId,
+      threadRootEventId: hostileEventId,
     });
+    driverEventIds.push(hostileEventId, triggerEventId);
     const matched = await client.waitForRoomEvent({
       observedEvents: context.observedEvents,
       predicate: (event) =>
-        isMatrixQaExactMarkerReply(event, { roomId, sutUserId: context.sutUserId, token }),
+        isMatrixQaExactMarkerReply(event, { roomId, sutUserId: context.sutUserId, token }) &&
+        event.relatesTo?.relType === "m.thread" &&
+        event.relatesTo.eventId === hostileEventId,
       roomId,
       since,
       timeoutMs: context.timeoutMs,
     });
     since = matched.since ?? since;
     details.push(
-      `[proof] scene=reply-context-${testCase.label} hostileEvent=${hostileEventId} replyEvent=${matched.event.eventId} status=replied`,
+      `[proof] scene=thread-context-${testCase.label} hostileEvent=${hostileEventId} triggerEvent=${triggerEventId} replyEvent=${matched.event.eventId} status=replied`,
     );
   }
 
-  // Control: a legitimate m.image reply target must still render an attachment
-  // marker in the agent-visible reply context on both heads.
+  // Control: a legitimate m.image thread root must still render its attachment
+  // marker in the agent-visible thread starter on both heads.
   const controlCaption = `PROTOCONTROL image caption ${buildMatrixQaToken("PROTOCTL")}`;
   const controlImageEventId = await client.sendMediaMessage({
     body: controlCaption,
@@ -156,17 +179,16 @@ export async function runProtoMsgtypeReplyContextScenario(
     contentType: "image/png",
     fileName: "proto-msgtype-control.png",
     kind: "image",
-    mentionUserIds: [context.sutUserId],
     roomId,
   });
-  driverEventIds.push(controlImageEventId);
   const controlToken = buildMatrixQaToken("PROTOK");
-  await client.sendTextMessage({
-    body: `${context.sutUserId} prototype msgtype control probe: reply with only this exact marker: ${controlToken}`,
+  const controlTriggerEventId = await client.sendTextMessage({
+    body: `${buildMentionPrompt(context.sutUserId, controlToken)} prototype msgtype control probe`,
     mentionUserIds: [context.sutUserId],
-    replyToEventId: controlImageEventId,
     roomId,
+    threadRootEventId: controlImageEventId,
   });
+  driverEventIds.push(controlImageEventId, controlTriggerEventId);
   const controlMatched = await client.waitForRoomEvent({
     observedEvents: context.observedEvents,
     predicate: (event) =>
@@ -174,14 +196,16 @@ export async function runProtoMsgtypeReplyContextScenario(
         roomId,
         sutUserId: context.sutUserId,
         token: controlToken,
-      }),
+      }) &&
+      event.relatesTo?.relType === "m.thread" &&
+      event.relatesTo.eventId === controlImageEventId,
     roomId,
     since,
     timeoutMs: context.timeoutMs,
   });
   since = controlMatched.since ?? since;
   details.push(
-    `[proof] scene=control-image imageEvent=${controlImageEventId} replyEvent=${controlMatched.event.eventId} status=replied`,
+    `[proof] scene=control-image imageEvent=${controlImageEventId} triggerEvent=${controlTriggerEventId} replyEvent=${controlMatched.event.eventId} status=replied`,
   );
 
   advanceMatrixQaActorCursor({
@@ -192,31 +216,32 @@ export async function runProtoMsgtypeReplyContextScenario(
   });
 
   // Assert on the exact text the gateway sent to the model for the agent
-  // turns: the reply-context quote of each hostile event must be plain text,
+  // turns: the thread-starter summary of each hostile event must be plain text,
   // while the control image must keep its attachment marker.
-  const inputText = await readMockProviderInputText(context);
-  details.push(`[proof] provider-requests bytes=${inputText.length}`);
+  const requests = await readMockProviderRequests(context);
+  const inputText = joinRecordedInputText(requests);
+  details.push(`[proof] provider-requests count=${requests.length} inputBytes=${inputText.length}`);
   const missingProbe = [...hostileBodies, controlCaption].filter(
     (text) => !inputText.includes(text),
   );
   if (missingProbe.length > 0) {
     throw new Error(
-      `[proof] scene=provider-requests status=FAIL probe bodies missing from recorded model input: ${missingProbe.join(" | ")}; excerpt=${inputExcerpt(inputText)}`,
+      `[proof] scene=provider-requests status=FAIL probe bodies missing from recorded model input: ${missingProbe.join(" | ")}; recorded:\n${summarizeRecordedRequests(requests)}`,
     );
   }
   const foundCorrupted = CORRUPTED_MARKERS.filter((marker) => inputText.includes(marker));
   if (foundCorrupted.length > 0) {
     throw new Error(
-      `[proof] scene=reply-context status=FAIL corrupted media markers reached the recorded model input: ${foundCorrupted.join(" | ")}`,
+      `[proof] scene=thread-context status=FAIL corrupted media markers reached the recorded model input: ${foundCorrupted.join(" | ")}`,
     );
   }
   if (!inputText.includes(CONTROL_ATTACHMENT_MARKER)) {
     throw new Error(
-      `[proof] scene=control-image status=FAIL missing attachment marker ${CONTROL_ATTACHMENT_MARKER} in recorded model input; excerpt=${inputExcerpt(inputText)}`,
+      `[proof] scene=control-image status=FAIL missing attachment marker ${CONTROL_ATTACHMENT_MARKER} in recorded model input; recorded:\n${summarizeRecordedRequests(requests)}`,
     );
   }
   details.push(
-    "[proof] scene=reply-context status=pass prototype-named msgtypes stayed plain text in recorded model input",
+    "[proof] scene=thread-context status=pass prototype-named msgtypes stayed plain text in recorded model input",
   );
   details.push(
     `[proof] scene=control-image status=pass marker=${CONTROL_ATTACHMENT_MARKER} present in recorded model input`,

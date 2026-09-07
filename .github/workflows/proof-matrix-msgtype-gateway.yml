@@ -57,7 +57,7 @@ jobs:
           src="$RUNNER_TEMP/proof-source"
           cp "$GITHUB_WORKSPACE/proof-scaffold/scenario-runtime-proto-msgtype.ts" \
             "$src/extensions/qa-lab/src/live-transports/matrix/scenarios/"
-          cp "$GITHUB_WORKSPACE/proof-scaffold/matrix-proto-msgtype-reply-context.yaml" \
+          cp "$GITHUB_WORKSPACE/proof-scaffold/matrix-proto-msgtype-thread-context.yaml" \
             "$src/qa/scenarios/channels/"
           git -C "$src" apply "$GITHUB_WORKSPACE/proof-scaffold/scenario-flow-runner.patch"
 
@@ -89,7 +89,7 @@ jobs:
           OPENCLAW_QA_REDACT_PUBLIC_METADATA=1 pnpm openclaw qa matrix \
             --repo-root . \
             --output-dir "$output_dir" \
-            --scenario matrix-proto-msgtype-reply-context \
+            --scenario matrix-proto-msgtype-thread-context \
             --provider-mode mock-openai \
             --model mock-openai/gpt-5.6-luna \
             --alt-model mock-openai/gpt-5.6-luna-alt \
@@ -140,7 +140,7 @@ jobs:
           after="$root/proof-after"
 
           # BEFORE must reproduce the bug for the intended reason: the scenario
-          # detected corrupted media markers in the agent transcript.
+          # detected corrupted media markers in the recorded model input.
           before_exit="$(tr -d '[:space:]' < "$before/lane-exit.txt")"
           if [[ "$before_exit" != "0" ]]; then
             echo "[proof] scene=before-lane status=pass detail=lane exited $before_exit (bug reproduced)"
@@ -148,7 +148,7 @@ jobs:
             echo "[proof] scene=before-lane status=FAIL detail=before lane unexpectedly passed"
             fail=1
           fi
-          check before-corrupted "$before" "corrupted media markers reached"
+          check before-corrupted "$before" "corrupted media markers reached the recorded model input"
           check before-corrupted-marker "$before" "[matrix function Object()"
 
           # AFTER must pass the same scenario cleanly.
@@ -159,8 +159,7 @@ jobs:
             echo "[proof] scene=after-lane status=FAIL detail=after lane exited $after_exit"
             fail=1
           fi
-          check after-reply-context "$after" "scene=reply-context"
-          check after-reply-context-pass "$after" "prototype-named msgtypes stayed plain text in recorded model input"
+          check after-thread-context "$after" "scene=thread-context status=pass"
           check after-control-image "$after" "scene=control-image status=pass"
 
           # The corrupted marker must appear nowhere in the after artifacts.
