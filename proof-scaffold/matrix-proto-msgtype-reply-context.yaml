@@ -24,7 +24,7 @@ scenario:
         defaultRoomKey: main
         rooms:
           - encrypted: false
-            key: main
+            key: proto
             kind: group
             members:
               - driver

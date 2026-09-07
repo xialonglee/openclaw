@@ -10,6 +10,7 @@
 // reached the model.
 import { randomUUID } from "node:crypto";
 import { requestMatrixJson } from "../substrate/request.js";
+import { resolveMatrixQaScenarioRoomId } from "./scenario-contract.js";
 import { createMatrixQaSplitColorImagePng } from "./scenario-media-fixtures.js";
 import {
   advanceMatrixQaActorCursor,
@@ -80,7 +81,7 @@ async function readRoomAgentTranscript(context: MatrixQaScenarioContext, roomId:
 export async function runProtoMsgtypeReplyContextScenario(
   context: MatrixQaScenarioContext,
 ): Promise<MatrixQaScenarioExecution> {
-  const roomId = context.roomId;
+  const roomId = resolveMatrixQaScenarioRoomId(context, "proto");
   const { client, startSince } = await primeMatrixQaDriverScenarioClient(context);
   const details = [`room id: ${roomId}`];
   const driverEventIds: string[] = [];
