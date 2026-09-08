@@ -230,6 +230,18 @@ jobs:
           const priorSessionId = "pr124953-proof-existing-session";
           const priorRunId = "pr124953-proof-existing-run";
           const now = new Date();
+          // The trajectory table FK-references session_windows(session_id), so the
+          // prior session row must exist before its events can be appended.
+          await replaceSessionEntry(
+            { sessionKey, storePath },
+            {
+              sessionId: priorSessionId,
+              updatedAt: Date.now(),
+              status: "running",
+              abortedLastRun: false,
+              lifecycleRunId: priorRunId,
+            },
+          );
           appendSqliteTrajectoryRuntimeEvents(
             { agentId: "main", sessionId: priorSessionId, storePath },
             [
