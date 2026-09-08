@@ -4,6 +4,16 @@ on:
   push:
     branches:
       - fix/issue-104950-recovery-trajectory-interrupted-proof
+  workflow_dispatch:
+    inputs:
+      before_sha:
+        description: "Baseline SHA (upstream main) proving the gap"
+        required: true
+        default: "c8cb22a899ac31a89d7c9748355048830593d962"
+      after_sha:
+        description: "PR head SHA proving the fix"
+        required: true
+        default: "68c6064b4197a82c10d1b38e2f23f18294edd6a8"
 
 permissions: {}
 
@@ -13,8 +23,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BEFORE_SHA: c578d324ef1990e0cdab326ee993d8436dd5fcf7
-      AFTER_SHA: 41c736fb3112bd16ffc93e263b7edce5ff52a95a
+      BEFORE_SHA: ${{ inputs.before_sha || 'c8cb22a899ac31a89d7c9748355048830593d962' }}
+      AFTER_SHA: ${{ inputs.after_sha || '68c6064b4197a82c10d1b38e2f23f18294edd6a8' }}
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
 
@@ -45,8 +55,9 @@ jobs:
 
           cat > "$source_dir/proof-before.mts" <<'EOF'
           /**
-           * Real-behavior proof for PR #124953 (before head):
+           * Real-behavior proof for PR #124953 (before head = current upstream main):
            * restart marker updates the row but does NOT write a trajectory event.
+           * Uses the post-rebase main API shape (activeRuns candidates).
            */
           import { mkdtempSync, rmSync } from "node:fs";
           import { tmpdir } from "node:os";
@@ -54,6 +65,7 @@ jobs:
 
           import { replaceSessionEntry, loadSessionEntry } from "./src/config/sessions/session-accessor.js";
           import { markRestartAbortedMainSessions } from "./src/agents/main-session-recovery/main-session-restart-recovery-marking.js";
+          import { getAgentEventLifecycleGeneration } from "./src/infra/agent-events.js";
           import { loadSqliteTrajectoryRuntimeEvents } from "./src/trajectory/runtime-store.sqlite.js";
 
           const stateDir = mkdtempSync(path.join(tmpdir(), "openclaw-pr124953-proof-before-"));
@@ -73,8 +85,11 @@ jobs:
             },
           );
           const result = await markRestartAbortedMainSessions({
+            resolveGatewayContext: () => undefined,
             stateDir,
-            sessionKeys: [sessionKey],
+            activeRuns: [
+              { sessionKey, sessionId, runId, lifecycleGeneration: getAgentEventLifecycleGeneration() },
+            ],
             reason: "gateway restart drain",
           });
           const entry = loadSessionEntry({ sessionKey, storePath });
@@ -92,9 +107,12 @@ jobs:
 
           cat > "$source_dir/proof-after.mts" <<'EOF'
           /**
-           * Real-behavior proof for PR #124953 (after head):
-           * - restart marker writes interrupted trajectory event
-           * - admitted-recovery rollback writes interrupted trajectory event
+           * Real-behavior proof for PR #124953 (rebased head):
+           * - scenario 1 (fresh store): restart marker writes interrupted trajectory event
+           * - scenario 2 (fresh store): admitted-recovery rollback writes interrupted event
+           * - scenario 3 (existing store): pre-existing trajectory rows from a prior
+           *   session survive the interrupted append and both sessions read back
+           *   correctly through fresh read-only connections (reopen behavior).
            */
           import { mkdtempSync, rmSync } from "node:fs";
           import { tmpdir } from "node:os";
@@ -105,7 +123,10 @@ jobs:
           import { markRestartAbortedMainSessions } from "./src/agents/main-session-recovery/main-session-restart-recovery-marking.js";
           import { createRestoreAdmittedRecoveryInterrupted } from "./src/agents/main-session-recovery/main-session-recovery-store.js";
           import { getAgentEventLifecycleGeneration } from "./src/infra/agent-events.js";
-          import { loadSqliteTrajectoryRuntimeEvents } from "./src/trajectory/runtime-store.sqlite.js";
+          import {
+            appendSqliteTrajectoryRuntimeEvents,
+            loadSqliteTrajectoryRuntimeEvents,
+          } from "./src/trajectory/runtime-store.sqlite.js";
 
           const stateDir = mkdtempSync(path.join(tmpdir(), "openclaw-pr124953-proof-after-"));
           const storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
@@ -114,7 +135,7 @@ jobs:
 
           let failed = false;
 
-          // Scenario 1: gateway restart marker
+          // Scenario 1: gateway restart marker on a fresh store.
           const sessionId1 = "pr124953-proof-restart-session";
           const runId1 = "pr124953-proof-restart-run";
           await replaceSessionEntry(
@@ -128,8 +149,11 @@ jobs:
             },
           );
           const markResult = await markRestartAbortedMainSessions({
+            resolveGatewayContext: () => undefined,
             stateDir,
-            sessionKeys: [sessionKey],
+            activeRuns: [
+              { sessionKey, sessionId: sessionId1, runId: runId1, lifecycleGeneration },
+            ],
             reason: "gateway restart drain",
           });
           const entry1 = loadSessionEntry({ sessionKey, storePath });
@@ -150,7 +174,7 @@ jobs:
             failed = true;
           }
 
-          // Scenario 2: admitted-recovery rollback
+          // Scenario 2: admitted-recovery rollback on a fresh store.
           const sessionId2 = "pr124953-proof-admit-session";
           const runId2 = "pr124953-proof-admit-run";
           await replaceSessionEntry(
@@ -200,6 +224,89 @@ jobs:
             failed = true;
           }
 
+          // Scenario 3: existing store. Pre-existing trajectory rows for a prior
+          // completed session must survive the interrupted append; both sessions
+          // must read back through fresh read-only connections after reopen.
+          const priorSessionId = "pr124953-proof-existing-session";
+          const priorRunId = "pr124953-proof-existing-run";
+          const now = new Date();
+          appendSqliteTrajectoryRuntimeEvents(
+            { agentId: "main", sessionId: priorSessionId, storePath },
+            [
+              {
+                traceSchema: "openclaw-trajectory",
+                schemaVersion: 1,
+                traceId: priorSessionId,
+                source: "runtime",
+                type: "session.started",
+                ts: now.toISOString(),
+                seq: 0,
+                sourceSeq: 0,
+                sessionId: priorSessionId,
+                sessionKey,
+                runId: priorRunId,
+                data: { status: "running" },
+              },
+              {
+                traceSchema: "openclaw-trajectory",
+                schemaVersion: 1,
+                traceId: priorSessionId,
+                source: "runtime",
+                type: "session.ended",
+                ts: now.toISOString(),
+                seq: 1,
+                sourceSeq: 1,
+                sessionId: priorSessionId,
+                sessionKey,
+                runId: priorRunId,
+                data: { status: "completed", aborted: false },
+              },
+            ],
+          );
+          const sessionId3 = "pr124953-proof-existing-interrupt-session";
+          const runId3 = "pr124953-proof-existing-interrupt-run";
+          await replaceSessionEntry(
+            { sessionKey, storePath },
+            {
+              sessionId: sessionId3,
+              updatedAt: Date.now(),
+              status: "running",
+              abortedLastRun: false,
+              lifecycleRunId: runId3,
+            },
+          );
+          const markExisting = await markRestartAbortedMainSessions({
+            resolveGatewayContext: () => undefined,
+            stateDir,
+            activeRuns: [
+              { sessionKey, sessionId: sessionId3, runId: runId3, lifecycleGeneration },
+            ],
+            reason: "gateway restart drain",
+          });
+          const priorEvents = await loadSqliteTrajectoryRuntimeEvents({
+            sessionId: priorSessionId,
+            storePath,
+          });
+          const newEvents = await loadSqliteTrajectoryRuntimeEvents({ sessionId: sessionId3, storePath });
+          const ok3 =
+            markExisting.marked === 1 &&
+            priorEvents.length === 2 &&
+            priorEvents[0].type === "session.started" &&
+            priorEvents[1].type === "session.ended" &&
+            priorEvents[1].data?.status === "completed" &&
+            newEvents.length === 1 &&
+            newEvents[0].type === "session.ended" &&
+            newEvents[0].data?.status === "interrupted" &&
+            newEvents[0].data?.aborted === true &&
+            newEvents[0].runId === runId3;
+          console.log(
+            `[proof] scene=existing_store_survives status=${ok3 ? "pass" : "fail"} marked=${markExisting.marked} priorEvents=${priorEvents.length} newEvents=${newEvents.length}`,
+          );
+          if (!ok3) {
+            console.log(JSON.stringify({ priorEvents, newEvents }, null, 2));
+            failed = true;
+          }
+
           rmSync(stateDir, { recursive: true, force: true });
 
           if (failed) {
@@ -244,7 +351,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
-          grep -E '^\[proof\] scene=(restart_marker_before|restart_marker_after|admitted_recovery_rollback) status=pass' proof.log
+          grep -E '^\[proof\] scene=(restart_marker_before|restart_marker_after|admitted_recovery_rollback|existing_store_survives) status=pass' proof.log
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
