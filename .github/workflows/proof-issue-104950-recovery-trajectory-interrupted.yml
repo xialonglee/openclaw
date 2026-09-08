@@ -319,6 +319,56 @@ jobs:
             failed = true;
           }
 
+          // Scenario 4: capture opt-out. OPENCLAW_TRAJECTORY=0 must skip the
+          // terminal event while the interruption marking still commits.
+          const sessionId4 = "pr124953-proof-optout-session";
+          const runId4 = "pr124953-proof-optout-run";
+          await replaceSessionEntry(
+            { sessionKey, storePath },
+            {
+              sessionId: sessionId4,
+              updatedAt: Date.now(),
+              status: "running",
+              abortedLastRun: false,
+              lifecycleRunId: runId4,
+            },
+          );
+          const previousTrajectory = process.env.OPENCLAW_TRAJECTORY;
+          process.env.OPENCLAW_TRAJECTORY = "0";
+          let markOptOut = { marked: -1, skipped: -1 };
+          try {
+            markOptOut = await markRestartAbortedMainSessions({
+              resolveGatewayContext: () => undefined,
+              stateDir,
+              activeRuns: [
+                { sessionKey, sessionId: sessionId4, runId: runId4, lifecycleGeneration },
+              ],
+              reason: "gateway restart drain",
+            });
+          } finally {
+            if (previousTrajectory === undefined) {
+              delete process.env.OPENCLAW_TRAJECTORY;
+            } else {
+              process.env.OPENCLAW_TRAJECTORY = previousTrajectory;
+            }
+          }
+          const optOutEvents = await loadSqliteTrajectoryRuntimeEvents({
+            sessionId: sessionId4,
+            storePath,
+          });
+          const entry4 = loadSessionEntry({ sessionKey, storePath });
+          const ok4 =
+            markOptOut.marked === 1 &&
+            entry4?.abortedLastRun === true &&
+            optOutEvents.length === 0;
+          console.log(
+            `[proof] scene=capture_opt_out_skips_event status=${ok4 ? "pass" : "fail"} marked=${markOptOut.marked} events=${optOutEvents.length}`,
+          );
+          if (!ok4) {
+            console.log(JSON.stringify({ entry4, optOutEvents }, null, 2));
+            failed = true;
+          }
+
           rmSync(stateDir, { recursive: true, force: true });
 
           if (failed) {
@@ -363,7 +413,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
-          grep -E '^\[proof\] scene=(restart_marker_before|restart_marker_after|admitted_recovery_rollback|existing_store_survives) status=pass' proof.log
+          grep -E '^\[proof\] scene=(restart_marker_before|restart_marker_after|admitted_recovery_rollback|existing_store_survives|capture_opt_out_skips_event) status=pass' proof.log
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
