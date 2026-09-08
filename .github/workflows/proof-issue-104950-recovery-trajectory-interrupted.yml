@@ -13,7 +13,7 @@ on:
       after_sha:
         description: "PR head SHA proving the fix"
         required: true
-        default: "ad8d8a03744883dc08d2b0e90e5e4486dddc3ce2"
+        default: "e96e6e04bf20f28d1e16a8c5547c08e0cde08d7b"
 
 permissions: {}
 
@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 45
     env:
       BEFORE_SHA: ${{ inputs.before_sha || 'c8cb22a899ac31a89d7c9748355048830593d962' }}
-      AFTER_SHA: ${{ inputs.after_sha || 'ad8d8a03744883dc08d2b0e90e5e4486dddc3ce2' }}
+      AFTER_SHA: ${{ inputs.after_sha || 'e96e6e04bf20f28d1e16a8c5547c08e0cde08d7b' }}
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
 
