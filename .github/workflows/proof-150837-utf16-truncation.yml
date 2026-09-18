@@ -75,7 +75,10 @@ jobs:
             src/skills/workshop/experience-review.proof.e2e.test.ts 2>&1 | tee "$RUNNER_TEMP/proof-before-e2e.log"
           echo "=== BEFORE e2e assertions ==="
           grep -E '\[proof\] scene=workshop-realhandler status=pass' "$RUNNER_TEMP/proof-workshop-before.txt"
-          grep -E '\[proof\] scene=workshop-boundary status=pass handlerTruncation=slice' "$RUNNER_TEMP/proof-workshop-before.txt"
+          # note: intermediate fields (sliceLen/sliceSplitPair/...) sit between status=pass and handlerTruncation=,
+          # so the pattern spans them with .*
+          grep -E '\[proof\] scene=workshop-boundary status=pass.*handlerTruncation=slice' "$RUNNER_TEMP/proof-workshop-before.txt" \
+            || { echo "FAIL: expected BEFORE workshop-boundary handlerTruncation=slice; actual:"; grep '\[proof\] scene=workshop-boundary' "$RUNNER_TEMP/proof-workshop-before.txt" || true; exit 1; }
 
       # ③ AFTER 树：修复后同一链路（期望干净边界）
       - name: Install dependencies (after)
@@ -111,7 +114,8 @@ jobs:
             src/skills/workshop/experience-review.proof.e2e.test.ts 2>&1 | tee "$RUNNER_TEMP/proof-after-e2e.log"
           echo "=== AFTER e2e assertions ==="
           grep -E '\[proof\] scene=workshop-realhandler status=pass' "$RUNNER_TEMP/proof-workshop-after.txt"
-          grep -E '\[proof\] scene=workshop-boundary status=pass handlerTruncation=utf16safe' "$RUNNER_TEMP/proof-workshop-after.txt"
+          grep -E '\[proof\] scene=workshop-boundary status=pass.*handlerTruncation=utf16safe' "$RUNNER_TEMP/proof-workshop-after.txt" \
+            || { echo "FAIL: expected AFTER workshop-boundary handlerTruncation=utf16safe; actual:"; grep '\[proof\] scene=workshop-boundary' "$RUNNER_TEMP/proof-workshop-after.txt" || true; exit 1; }
 
       - name: Collect proof summary
         if: always()
