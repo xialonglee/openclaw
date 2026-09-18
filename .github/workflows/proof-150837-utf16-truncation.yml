@@ -10,10 +10,10 @@ jobs:
   proof:
     name: before/after real-behavior proof
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
-      BEFORE_SHA: 448b7740ddf9eb77368a9ba52d2bd42130edfc43
-      AFTER_SHA: 34b00427c4c28f260befd34b34f4f8fc6c93e7bd
+      BEFORE_SHA: 278cc5420cbc66cdfcea5d4494353bce8b553290
+      AFTER_SHA: 5e520f6208fb5d4999a63f67dbb82bd40d596ece
       CI: true
       OPENCLAW_SKIP_UPDATE_CHECK: 1
 
@@ -39,6 +39,7 @@ jobs:
           git fetch --depth=1 origin "$BEFORE_SHA"
           git fetch --depth=1 origin "$AFTER_SHA"
 
+      # ① BEFORE 树：doctor 真实 child->parent 交接（期望 surrogate 损坏）
       - name: Install dependencies (before)
         shell: bash
         run: |
@@ -49,21 +50,34 @@ jobs:
           corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
           pnpm install --frozen-lockfile
 
-      - name: Prove BEFORE fix (expect surrogate corruption)
+      - name: Prove BEFORE doctor handoff (expect surrogate corruption)
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
           cp -r "$GITHUB_WORKSPACE/proof-branch/proof" "$RUNNER_TEMP/proof-source/proof"
-          echo "=== BEFORE proof (expected: corruption at slice boundaries) ==="
-          PROOF_MODE=before pnpm exec tsx proof/proof.mts 2>&1 | tee "$RUNNER_TEMP/proof-before.log"
-          echo ""
-          echo "=== BEFORE markers ==="
-          grep '\[proof\]' "$RUNNER_TEMP/proof-before.log"
-          echo "=== BEFORE assertions ==="
-          grep -E '\[proof\] scene=doctor mode=before status=pass corrupted=true' "$RUNNER_TEMP/proof-before.log"
-          grep -E '\[proof\] scene=workshop mode=before status=pass corrupted=true' "$RUNNER_TEMP/proof-before.log"
+          echo "=== BEFORE doctor proof (BEFORE .slice(0,500) splits the pair) ==="
+          PROOF_MODE=before pnpm exec tsx proof/proof.mts 2>&1 | tee "$RUNNER_TEMP/proof-before-doctor.log"
+          echo "=== BEFORE doctor assertions ==="
+          grep -E '\[proof\] scene=doctor mode=before status=pass corrupted=true' "$RUNNER_TEMP/proof-before-doctor.log"
 
+      # ② BEFORE 树 e2e：真实失败 handler 持久化 + boundary 原语对比
+      - name: Prove BEFORE e2e workshop handler (expect handlerTruncation=slice)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp "$GITHUB_WORKSPACE/proof-branch/src/skills/workshop/experience-review.proof.e2e.test.ts" \
+             "$RUNNER_TEMP/proof-source/src/skills/workshop/experience-review.proof.e2e.test.ts"
+          echo "=== BEFORE e2e workshop proof (BEFORE catch uses .slice(0,300)) ==="
+          PROOF_MARKER_FILE="$RUNNER_TEMP/proof-workshop-before.txt" \
+            pnpm exec vitest run --config test/vitest/vitest.e2e.config.ts \
+            src/skills/workshop/experience-review.proof.e2e.test.ts 2>&1 | tee "$RUNNER_TEMP/proof-before-e2e.log"
+          echo "=== BEFORE e2e assertions ==="
+          grep -E '\[proof\] scene=workshop-realhandler status=pass' "$RUNNER_TEMP/proof-workshop-before.txt"
+          grep -E '\[proof\] scene=workshop-boundary status=pass handlerTruncation=slice' "$RUNNER_TEMP/proof-workshop-before.txt"
+
+      # ③ AFTER 树：修复后同一链路（期望干净边界）
       - name: Install dependencies (after)
         shell: bash
         run: |
@@ -72,20 +86,32 @@ jobs:
           git checkout --detach "$AFTER_SHA"
           pnpm install --frozen-lockfile
 
-      - name: Prove AFTER fix (expect clean surrogate halves)
+      - name: Prove AFTER doctor handoff (expect clean 499-unit warning)
         shell: bash
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/proof-source"
           cp -r "$GITHUB_WORKSPACE/proof-branch/proof" "$RUNNER_TEMP/proof-source/proof"
-          echo "=== AFTER proof (expected: no corruption) ==="
-          PROOF_MODE=after pnpm exec tsx proof/proof.mts 2>&1 | tee "$RUNNER_TEMP/proof-after.log"
-          echo ""
-          echo "=== AFTER markers ==="
-          grep '\[proof\]' "$RUNNER_TEMP/proof-after.log"
-          echo "=== AFTER assertions ==="
-          grep -E '\[proof\] scene=doctor mode=after status=pass corrupted=false len=499' "$RUNNER_TEMP/proof-after.log"
-          grep -E '\[proof\] scene=workshop mode=after status=pass corrupted=false len=299' "$RUNNER_TEMP/proof-after.log"
+          echo "=== AFTER doctor proof (AFTER truncateUtf16Safe keeps the pair) ==="
+          PROOF_MODE=after pnpm exec tsx proof/proof.mts 2>&1 | tee "$RUNNER_TEMP/proof-after-doctor.log"
+          echo "=== AFTER doctor assertions ==="
+          grep -E '\[proof\] scene=doctor mode=after status=pass corrupted=false len=499' "$RUNNER_TEMP/proof-after-doctor.log"
+
+      # ④ AFTER 树 e2e：同一测试，期望 handlerTruncation=utf16safe
+      - name: Prove AFTER e2e workshop handler (expect handlerTruncation=utf16safe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp "$GITHUB_WORKSPACE/proof-branch/src/skills/workshop/experience-review.proof.e2e.test.ts" \
+             "$RUNNER_TEMP/proof-source/src/skills/workshop/experience-review.proof.e2e.test.ts"
+          echo "=== AFTER e2e workshop proof (AFTER catch uses truncateUtf16Safe) ==="
+          PROOF_MARKER_FILE="$RUNNER_TEMP/proof-workshop-after.txt" \
+            pnpm exec vitest run --config test/vitest/vitest.e2e.config.ts \
+            src/skills/workshop/experience-review.proof.e2e.test.ts 2>&1 | tee "$RUNNER_TEMP/proof-after-e2e.log"
+          echo "=== AFTER e2e assertions ==="
+          grep -E '\[proof\] scene=workshop-realhandler status=pass' "$RUNNER_TEMP/proof-workshop-after.txt"
+          grep -E '\[proof\] scene=workshop-boundary status=pass handlerTruncation=utf16safe' "$RUNNER_TEMP/proof-workshop-after.txt"
 
       - name: Collect proof summary
         if: always()
@@ -93,17 +119,23 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/proof-logs"
-          cp "$RUNNER_TEMP/proof-before.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
-          cp "$RUNNER_TEMP/proof-after.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/proof-before-doctor.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/proof-after-doctor.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/proof-workshop-before.txt" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/proof-workshop-after.txt" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
           {
             echo "BEFORE_SHA=$BEFORE_SHA"
             echo "AFTER_SHA=$AFTER_SHA"
             echo ""
-            echo "=== BEFORE markers ==="
-            grep '\[proof\]' "$RUNNER_TEMP/proof-before.log" 2>/dev/null || true
+            echo "=== doctor markers ==="
+            grep '\[proof\]' "$RUNNER_TEMP/proof-before-doctor.log" 2>/dev/null || true
+            grep '\[proof\]' "$RUNNER_TEMP/proof-after-doctor.log" 2>/dev/null || true
             echo ""
-            echo "=== AFTER markers ==="
-            grep '\[proof\]' "$RUNNER_TEMP/proof-after.log" 2>/dev/null || true
+            echo "=== e2e workshop markers (before) ==="
+            grep '\[proof\]' "$RUNNER_TEMP/proof-workshop-before.txt" 2>/dev/null || true
+            echo ""
+            echo "=== e2e workshop markers (after) ==="
+            grep '\[proof\]' "$RUNNER_TEMP/proof-workshop-after.txt" 2>/dev/null || true
           } > "$RUNNER_TEMP/proof-logs/summary.log"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
