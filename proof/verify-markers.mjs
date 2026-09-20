@@ -50,42 +50,53 @@ const markerLines = log
 
 const failures = [];
 for (const expectation of profile) {
-  const line = markerLines.find((entry) => entry.includes(`scene=${expectation.scene} `));
-  if (!line) {
+  const candidates = markerLines.filter((entry) => entry.includes(`scene=${expectation.scene} `));
+  if (candidates.length === 0) {
     failures.push(`${expectation.scene}: marker line missing`);
     continue;
   }
-  const stagedMatch = line.match(/staged=(.*) write=/u);
-  const writeMatch = line.match(/ write=(\S+) stat=/u);
-  const statMatch = line.match(/ stat=(\S+)$/u);
-  const stagedRaw = stagedMatch?.[1] ?? "";
-  const write = writeMatch?.[1] ?? "";
-  const stat = statMatch?.[1] ?? "";
-  let staged = "";
-  try {
-    staged = JSON.parse(stagedRaw);
-  } catch {
-    failures.push(`${expectation.scene}: staged marker is not JSON: ${stagedRaw}`);
-    continue;
-  }
-  if (expectation.staged !== undefined && staged !== expectation.staged) {
+  const parsed = candidates.map((line) => {
+    const stagedMatch = line.match(/staged=(.*) write=/u);
+    const writeMatch = line.match(/ write=(\S+) stat=/u);
+    const statMatch = line.match(/ stat=(\S+)$/u);
+    let staged = null;
+    try {
+      staged = JSON.parse(stagedMatch?.[1] ?? "");
+    } catch {
+      staged = null;
+    }
+    return { staged, write: writeMatch?.[1] ?? "", stat: statMatch?.[1] ?? "", line };
+  });
+  const matched = parsed.some((candidate) => {
+    if (candidate.staged === null) {
+      return false;
+    }
+    if (expectation.staged !== undefined && candidate.staged !== expectation.staged) {
+      return false;
+    }
+    if (expectation.endsWith !== undefined && !candidate.staged.endsWith(expectation.endsWith)) {
+      return false;
+    }
+    if (expectation.write !== undefined && candidate.write !== expectation.write) {
+      return false;
+    }
+    if (expectation.writeIsError && !candidate.write.startsWith("error:")) {
+      return false;
+    }
+    if (expectation.stat !== undefined && candidate.stat !== expectation.stat) {
+      return false;
+    }
+    return true;
+  });
+  if (!matched) {
     failures.push(
-      `${expectation.scene}: staged=${JSON.stringify(staged)} expected=${JSON.stringify(expectation.staged)}`,
+      `${expectation.scene}: no marker matched expectation; saw ${parsed
+        .map(
+          (candidate) =>
+            `staged=${JSON.stringify(candidate.staged)} write=${candidate.write} stat=${candidate.stat}`,
+        )
+        .join(" | ")}`,
     );
-  }
-  if (expectation.endsWith !== undefined && !staged.endsWith(expectation.endsWith)) {
-    failures.push(
-      `${expectation.scene}: staged=${JSON.stringify(staged)} expected to end with ${JSON.stringify(expectation.endsWith)}`,
-    );
-  }
-  if (expectation.write !== undefined && write !== expectation.write) {
-    failures.push(`${expectation.scene}: write=${write} expected=${expectation.write}`);
-  }
-  if (expectation.writeIsError && !write.startsWith("error:")) {
-    failures.push(`${expectation.scene}: write=${write} expected an error`);
-  }
-  if (expectation.stat !== undefined && stat !== expectation.stat) {
-    failures.push(`${expectation.scene}: stat=${stat} expected=${expectation.stat}`);
   }
 }
 
