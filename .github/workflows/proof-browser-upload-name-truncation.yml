@@ -1,0 +1,210 @@
+name: Proof browser upload name truncation
+
+on:
+  push:
+    branches: [fix/gap-browser-upload-name-truncation-proof]
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  BEFORE_SHA: aac3e8a6ed27301bd56cfe4e97dbf96d88bb53f7
+  AFTER_SHA: ae4a099c42a12a605d98fd1881bab79b0eeb5c11
+  CI: true
+  OPENCLAW_SKIP_UPDATE_CHECK: 1
+
+jobs:
+  proof-ubuntu:
+    name: exact-head regression + real staging runtime (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof-source
+          cd proof-source
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Fetch proof helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/xialonglee/openclaw/${{ github.sha }}/proof"
+          curl -fsSL "$base/browser-proxy-upload.runtime.proof.test.ts" -o runtime.proof.test.ts
+          curl -fsSL "$base/verify-markers.mjs" -o verify-markers.mjs
+
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+
+      - name: Regression before (expected to fail)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          git checkout "$AFTER_SHA" -- extensions/browser/src/browser-proxy-upload.test.ts
+          node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.test.ts 2>&1 | tee -a proof.log || true
+          grep -q "keeps staged names portable after byte truncation" proof.log
+          grep -Eq "Tests +[0-9]+ passed.*1 failed|Tests +1 failed" proof.log
+          echo "[proof] scene=regression-before status=failed-as-expected" | tee -a proof.log
+
+      - name: Runtime staging before (ubuntu)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          git checkout "$BEFORE_SHA" -- extensions/browser/src/browser-proxy-upload.ts extensions/browser/src/browser-proxy-upload.test.ts
+          cp ../runtime.proof.test.ts extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts
+          node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts 2>&1 | tee -a proof.log || true
+
+      - name: Verify before markers (ubuntu)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          PROFILE=before-linux PROOF_LOG=proof.log node ../verify-markers.mjs | tee -a proof.log
+
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          git checkout --detach "$AFTER_SHA"
+          rm -f extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts
+          pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+
+      - name: Regression after (expected to pass)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.test.ts 2>&1 | tee -a proof.log
+          grep -Eq "Tests +18 passed" proof.log
+          echo "[proof] scene=regression-after status=passed" | tee -a proof.log
+
+      - name: Runtime staging after (ubuntu)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          cp ../runtime.proof.test.ts extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts
+          node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts 2>&1 | tee -a proof.log || true
+
+      - name: Verify after markers (ubuntu)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          PROFILE=after-linux PROOF_LOG=proof.log node ../verify-markers.mjs | tee -a proof.log
+          grep -q "scene=regression-before status=failed-as-expected" proof.log
+          grep -q "scene=regression-after status=passed" proof.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-browser-upload-name-truncation-ubuntu
+          path: proof-source/proof.log
+          retention-days: 30
+
+  proof-windows:
+    name: real staging runtime on native Windows (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof-source
+          cd proof-source
+          git init
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+
+      - name: Fetch proof helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/xialonglee/openclaw/${{ github.sha }}/proof"
+          curl -fsSL "$base/browser-proxy-upload.runtime.proof.test.ts" -o runtime.proof.test.ts
+          curl -fsSL "$base/verify-markers.mjs" -o verify-markers.mjs
+
+      - name: Install dependencies (before)
+        shell: bash
+        env:
+          INSTALL_FLAGS: --frozen-lockfile --prefer-offline --config.ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true --config.side-effects-cache=true
+        run: |
+          set -euo pipefail
+          cd proof-source
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install $INSTALL_FLAGS || pnpm install $INSTALL_FLAGS
+
+      - name: Runtime staging before (windows)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          cp ../runtime.proof.test.ts extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts
+          node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts 2>&1 | tee -a proof.log || true
+
+      - name: Verify before markers (windows)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          PROFILE=before-windows PROOF_LOG=proof.log node ../verify-markers.mjs | tee -a proof.log
+
+      - name: Install dependencies (after)
+        shell: bash
+        env:
+          INSTALL_FLAGS: --frozen-lockfile --prefer-offline --config.ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true --config.side-effects-cache=true
+        run: |
+          set -euo pipefail
+          cd proof-source
+          git checkout --detach "$AFTER_SHA"
+          rm -f extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts
+          pnpm install $INSTALL_FLAGS || pnpm install $INSTALL_FLAGS
+
+      - name: Runtime staging after (windows)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          cp ../runtime.proof.test.ts extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts
+          node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.runtime.proof.test.ts 2>&1 | tee -a proof.log || true
+
+      - name: Verify after markers (windows)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd proof-source
+          PROFILE=after-windows PROOF_LOG=proof.log node ../verify-markers.mjs | tee -a proof.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-browser-upload-name-truncation-windows
+          path: proof-source/proof.log
+          retention-days: 30
