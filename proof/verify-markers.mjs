@@ -24,13 +24,19 @@ const profiles = {
   ],
   "after-linux": LINUX_AFTER,
   "before-windows": [
-    { scene: "trailing-dot", endsWith: ".", write: "ok" },
-    { scene: "trailing-space", endsWith: " ", write: "ok" },
-    { scene: "unicode-boundary", endsWith: ".", write: "ok" },
-    { scene: "reserved-con", writeIsError: true },
+    { scene: "trailing-dot", staged: `${repeat("a", 179)}.`, write: "ok", stat: "ok" },
+    { scene: "trailing-space", staged: `${repeat("b", 179)} `, write: "ok", stat: "ok" },
+    { scene: "unicode-boundary", staged: `${repeat("c", 175)}🦞.`, write: "ok", stat: "ok" },
+    { scene: "reserved-con", staged: `CON${repeat(" ", 177)}`, write: "ok", stat: "ok" },
     { scene: "control", staged: "report.txt", write: "ok", stat: "ok" },
   ],
-  "after-windows": LINUX_AFTER,
+  "after-windows": [
+    { scene: "trailing-dot", staged: `${repeat("a", 179)}`, write: "ok", stat: "ok" },
+    { scene: "trailing-space", staged: `${repeat("b", 179)}`, write: "ok", stat: "ok" },
+    { scene: "unicode-boundary", staged: `${repeat("c", 175)}🦞`, write: "ok", stat: "ok" },
+    { scene: "reserved-con", staged: "_CON", write: "ok", stat: "ok" },
+    { scene: "control", staged: "report.txt", write: "ok", stat: "ok" },
+  ],
 };
 
 const profile = profiles[profileName];

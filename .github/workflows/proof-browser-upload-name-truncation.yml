@@ -59,8 +59,9 @@ jobs:
           cd proof-source
           git checkout "$AFTER_SHA" -- extensions/browser/src/browser-proxy-upload.test.ts
           node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.test.ts 2>&1 | tee -a proof.log || true
-          grep -q "keeps staged names portable after byte truncation" proof.log
-          grep -Eq "Tests +[0-9]+ passed.*1 failed|Tests +1 failed" proof.log
+          sed -r 's/\x1B\[[0-9;]*[mK]//g' proof.log > proof.clean.log
+          grep -q "keeps staged names portable after byte truncation" proof.clean.log
+          grep -Eq "Tests +1 failed \| 16 passed \(17\)" proof.clean.log
           echo "[proof] scene=regression-before status=failed-as-expected" | tee -a proof.log
 
       - name: Runtime staging before (ubuntu)
@@ -94,7 +95,8 @@ jobs:
           set -euo pipefail
           cd proof-source
           node scripts/run-vitest.mjs run extensions/browser/src/browser-proxy-upload.test.ts 2>&1 | tee -a proof.log
-          grep -Eq "Tests +18 passed" proof.log
+          sed -r 's/\x1B\[[0-9;]*[mK]//g' proof.log > proof.clean.log
+          grep -Eq "Tests +17 passed \(17\)" proof.clean.log
           echo "[proof] scene=regression-after status=passed" | tee -a proof.log
 
       - name: Runtime staging after (ubuntu)
