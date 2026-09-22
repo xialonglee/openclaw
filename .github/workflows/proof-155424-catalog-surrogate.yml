@@ -1,0 +1,104 @@
+name: Proof catalog surrogate-safe truncation at exact heads (PR #155424)
+
+on:
+  push:
+    branches: [fix/gap-codex-catalog-surrogate-truncate-proof]
+
+permissions: {}
+
+jobs:
+  proof:
+    name: before/after real-behavior proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      BEFORE_SHA: 44559eb315e09528aa287878494583e32ad9582e
+      AFTER_SHA: 2a722a1db430c9d6f24f6d6a2f9d584561e15064
+      CI: true
+      OPENCLAW_SKIP_UPDATE_CHECK: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: fix/gap-codex-catalog-surrogate-truncate-proof
+          path: proof-branch
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+      - name: Fetch immutable BEFORE/AFTER source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir"
+          cd "$source_dir"
+          git init
+          git remote add origin "https://github.com/openclaw/openclaw.git"
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git fetch --depth=1 origin "$AFTER_SHA"
+      - name: Install dependencies (before)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$BEFORE_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+      - name: Prove BEFORE catalog projection (expect split pair)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp -r "$GITHUB_WORKSPACE/proof-branch/proof" "$RUNNER_TEMP/proof-source/proof"
+          echo "=== BEFORE catalog projection proof (BEFORE .slice(0,500) splits the pair) ==="
+          PROOF_MODE=before pnpm exec tsx proof/proof.mts 2>&1 | tee "$RUNNER_TEMP/proof-before.log"
+          echo "=== BEFORE assertions ==="
+          grep -E '\[proof\] scene=originator-list mode=before status=pass .*originator_len=500' "$RUNNER_TEMP/proof-before.log"
+          grep -E '\[proof\] scene=originator-list mode=before status=pass .*lone_surrogate=true' "$RUNNER_TEMP/proof-before.log"
+          grep -E '\[proof\] scene=transport mode=before status=pass .*raw_fffd=true' "$RUNNER_TEMP/proof-before.log"
+      - name: Install dependencies (after)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout --detach "$AFTER_SHA"
+          pnpm install --frozen-lockfile
+      - name: Prove AFTER catalog projection (expect clean 499-unit originator)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          cp -r "$GITHUB_WORKSPACE/proof-branch/proof" "$RUNNER_TEMP/proof-source/proof"
+          echo "=== AFTER catalog projection proof (AFTER truncateUtf16Safe keeps the pair) ==="
+          PROOF_MODE=after pnpm exec tsx proof/proof.mts 2>&1 | tee "$RUNNER_TEMP/proof-after.log"
+          echo "=== AFTER assertions ==="
+          grep -E '\[proof\] scene=originator-list mode=after status=pass .*originator_len=499' "$RUNNER_TEMP/proof-after.log"
+          grep -E '\[proof\] scene=originator-list mode=after status=pass .*lone_surrogate=false' "$RUNNER_TEMP/proof-after.log"
+          grep -E '\[proof\] scene=identity-short mode=after status=pass .*preserved=true' "$RUNNER_TEMP/proof-after.log"
+          grep -E '\[proof\] scene=transport mode=after status=pass .*raw_fffd=false' "$RUNNER_TEMP/proof-after.log"
+          grep -E '\[proof\] all scenes passed' "$RUNNER_TEMP/proof-after.log"
+      - name: Collect proof summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/proof-logs"
+          cp "$RUNNER_TEMP/proof-before.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/proof-after.log" "$RUNNER_TEMP/proof-logs/" 2>/dev/null || true
+          {
+            echo "BEFORE_SHA=$BEFORE_SHA"
+            echo "AFTER_SHA=$AFTER_SHA"
+            echo ""
+            echo "=== before markers ==="
+            grep '\[proof\]' "$RUNNER_TEMP/proof-before.log" 2>/dev/null || true
+            echo ""
+            echo "=== after markers ==="
+            grep '\[proof\]' "$RUNNER_TEMP/proof-after.log" 2>/dev/null || true
+          } > "$RUNNER_TEMP/proof-logs/summary.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-155424-catalog-surrogate
+          path: |
+            ${{ runner.temp }}/proof-logs/
+          retention-days: 30
