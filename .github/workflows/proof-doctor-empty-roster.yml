@@ -1,0 +1,280 @@
+name: Proof doctor empty roster
+
+# Exact-head before/after proof for PR #171023
+# (fix(doctor): no workspace suggestions on an explicitly empty roster).
+# Runs only on the proof branch; never touches the PR branch or main.
+#
+# Scene 1 (changed scenario): the doctor workspace-suggestion scope resolver is
+# called in-process with an explicitly empty roster ({ agents: { entries: {} } })
+# at the main-head BEFORE_SHA and the PR-head AFTER_SHA. On BEFORE the throwing
+# fallback resolveDefaultAgentId owns the empty roster and rejects with
+# "No agents configured"; on AFTER the resolver returns [] (no suggestions).
+# This is the review-endorsed direct empty-roster injection proof path.
+#
+# Scene 2 (latest-stable upgrade): the real `openclaw@2026.10.3` binary (which
+# still ships the throwing fallback) is run against an isolated config/state dir,
+# then the same config/state dir is re-run under the PR-head build. Attached
+# checkable output: stable boundary throw, both CLI lint JSONs (final-config
+# validation preserved, workspace check does not throw), and the state SQLite
+# created on latest stable surviving the upgrade.
+
+on:
+  push:
+    branches:
+      - fix/gap-doctor-empty-roster-proof
+
+permissions: {}
+
+jobs:
+  proof:
+    name: proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      BEFORE_SHA: 0cf266e8493d747fa110537b6d4b704b6064c0c8
+      AFTER_SHA: 6066716da5b177290a45f8ea2998b5f4482cbfe9
+      STABLE_VERSION: 2026.10.3
+      CI: "true"
+      OPENCLAW_SKIP_UPDATE_CHECK: "1"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Fetch immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/proof-source"
+          mkdir -p "$source_dir" "$RUNNER_TEMP/proof"
+          cd "$source_dir"
+          git init -q
+          git remote add origin https://github.com/openclaw/openclaw.git
+          git fetch -q --depth=1 origin "$BEFORE_SHA"
+          git fetch -q --depth=1 origin "$AFTER_SHA"
+
+      - name: Install dependencies (PR head)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout -q --detach "$AFTER_SHA"
+          corepack enable
+          corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+          pnpm install --frozen-lockfile
+
+      # ---------- Scene 1: changed scenario at exact heads ----------
+      - name: Prove workspace scopes BEFORE (main head)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout -q --detach "$BEFORE_SHA"
+          node --import ./scripts/tsx.mjs --input-type=module -e '
+            import { resolveDoctorWorkspaceSuggestionScopes } from "./src/flows/doctor-workspace-suggestion-scopes.ts";
+            const cfg = { agents: { entries: {} } };
+            try {
+              const scopes = resolveDoctorWorkspaceSuggestionScopes(cfg);
+              const status = JSON.stringify(scopes) === "[]" ? "fail" : "pass";
+              console.log(`[proof] scene=workspace-scopes label=before status=${status} detail=resolved:${JSON.stringify(scopes)}`);
+            } catch (err) {
+              const msg = (err && err.message) || String(err);
+              const status = String(msg).includes("No agents configured") ? "pass" : "fail";
+              console.log(`[proof] scene=workspace-scopes label=before status=${status} detail=threw:${msg}`);
+            }
+          ' 2>&1 | tee -a "$RUNNER_TEMP/proof/before-scope.log"
+          grep -q 'scene=workspace-scopes label=before status=pass' "$RUNNER_TEMP/proof/before-scope.log" \
+            || { echo "::error::BEFORE must throw on an explicitly empty roster"; exit 1; }
+
+      - name: Prove workspace scopes AFTER (PR head)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout -q --detach "$AFTER_SHA"
+          node --import ./scripts/tsx.mjs --input-type=module -e '
+            import { resolveDoctorWorkspaceSuggestionScopes } from "./src/flows/doctor-workspace-suggestion-scopes.ts";
+            const cfg = { agents: { entries: {} } };
+            try {
+              const scopes = resolveDoctorWorkspaceSuggestionScopes(cfg);
+              const status = JSON.stringify(scopes) === "[]" ? "pass" : "fail";
+              console.log(`[proof] scene=workspace-scopes label=after status=${status} detail=resolved:${JSON.stringify(scopes)}`);
+            } catch (err) {
+              const msg = (err && err.message) || String(err);
+              console.log(`[proof] scene=workspace-scopes label=after status=fail detail=threw:${msg}`);
+            }
+          ' 2>&1 | tee -a "$RUNNER_TEMP/proof/after-scope.log"
+          grep -q 'scene=workspace-scopes label=after status=pass' "$RUNNER_TEMP/proof/after-scope.log" \
+            || { echo "::error::AFTER must resolve to [] for an explicitly empty roster"; exit 1; }
+
+      # ---------- Scene 2: latest-stable upgrade ----------
+      - name: Fetch latest stable openclaw and install deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          stable_root="$RUNNER_TEMP/stable"
+          mkdir -p "$stable_root"
+          cd "$stable_root"
+          npm pack "openclaw@$STABLE_VERSION" --silent
+          tar xzf "openclaw-$STABLE_VERSION.tgz"
+          cd package
+          npm install --omit=dev --ignore-scripts --no-audit --no-fund --legacy-peer-deps > "$RUNNER_TEMP/proof/stable-install.log" 2>&1
+          node openclaw.mjs --version > "$RUNNER_TEMP/proof/stable-version.log" 2>&1
+
+      - name: Prove latest-stable boundary throw, CLI lint and state creation
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/proof/upgrade/home"
+          export OPENCLAW_STATE_DIR="$RUNNER_TEMP/proof/upgrade/state"
+          export OPENCLAW_CONFIG_PATH="$RUNNER_TEMP/proof/upgrade/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+          printf '%s\n' '{"agents":{"ownership":"explicit","entries":{}}}' > "$OPENCLAW_CONFIG_PATH"
+          stable_dir="$RUNNER_TEMP/stable/package"
+
+          # 2a. boundary: latest stable still reaches the throwing fallback
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            const dir = process.argv[1];
+            const file = fs.readdirSync(dir).find((f) => f.includes("workspace-suggestion-scopes"));
+            const mod = await import(path.join(dir, file));
+            const fn = Object.values(mod).find((v) => typeof v === "function");
+            try {
+              const scopes = fn({ agents: { entries: {} } });
+              const status = JSON.stringify(scopes) === "[]" ? "fail" : "pass";
+              console.log("[proof] scene=stable-scope label=latest-stable status=" + status + " detail=resolved:" + JSON.stringify(scopes));
+            } catch (err) {
+              const msg = (err && err.message) || String(err);
+              const status = String(msg).includes("No agents configured") ? "pass" : "fail";
+              console.log("[proof] scene=stable-scope label=latest-stable status=" + status + " detail=threw:" + msg);
+            }
+          ' "$stable_dir/dist" 2>&1 | tee -a "$RUNNER_TEMP/proof/stable-scope.log"
+          grep -q 'scene=stable-scope label=latest-stable status=pass' "$RUNNER_TEMP/proof/stable-scope.log" \
+            || { echo "::error::latest stable must throw on an explicitly empty roster"; exit 1; }
+
+          # 2b. real binary CLI lint: validation preserved, no throw
+          set +e
+          (cd "$stable_dir" && node openclaw.mjs doctor --lint --only core/doctor/workspace-suggestions --json --no-color \
+            > "$RUNNER_TEMP/proof/stable-lint.json" 2> "$RUNNER_TEMP/proof/stable-lint.err")
+          stable_lint_exit=$?
+          set -e
+          node -e '
+            const fs = require("node:fs");
+            const out = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const ids = (out.findings ?? []).map((f) => f.checkId);
+            const fcv = ids.includes("core/doctor/final-config-validation");
+            const ws = ids.filter((i) => i === "core/doctor/workspace-suggestions").length;
+            const status = fcv && ws === 0 ? "pass" : "fail";
+            console.log(`[proof] scene=stable-cli label=latest-stable status=${status} checksRun=${out.checksRun} final_config_validation=${fcv} ws_findings=${ws} exit=${process.argv[2]}`);
+            if (status !== "pass") process.exit(1);
+          ' "$RUNNER_TEMP/proof/stable-lint.json" "$stable_lint_exit" 2>&1 | tee -a "$RUNNER_TEMP/proof/markers.txt"
+          if grep -q "No agents configured" "$RUNNER_TEMP/proof/stable-lint.err"; then
+            echo "::error::latest stable doctor crashed in workspace check"; exit 1;
+          fi
+
+          # 2c. doctor --fix on latest stable creates the state database
+          set +e
+          (cd "$stable_dir" && node openclaw.mjs doctor --fix --non-interactive --no-color \
+            > "$RUNNER_TEMP/proof/stable-fix.log" 2>&1)
+          stable_fix_exit=$?
+          set -e
+          sqlite_count=$(find "$OPENCLAW_STATE_DIR" -name '*.sqlite' -type f -size +0c | wc -l)
+          if [ "$sqlite_count" -ge 1 ]; then status=pass; else status=fail; fi
+          echo "[proof] scene=stable-state label=latest-stable status=$status sqlite_files=$sqlite_count fix_exit=$stable_fix_exit" | tee -a "$RUNNER_TEMP/proof/markers.txt"
+          if [ "$status" != "pass" ]; then
+            echo "::error::latest stable doctor --fix did not create the state database"; exit 1;
+          fi
+
+      - name: Prove PR head upgrade keeps state and validation, no throw
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/proof-source"
+          git checkout -q --detach "$AFTER_SHA"
+          export HOME="$RUNNER_TEMP/proof/upgrade/home"
+          export OPENCLAW_STATE_DIR="$RUNNER_TEMP/proof/upgrade/state"
+          export OPENCLAW_CONFIG_PATH="$RUNNER_TEMP/proof/upgrade/config.json"
+          mkdir -p "$HOME" "$OPENCLAW_STATE_DIR"
+
+          # warm up the tsdown build so the JSON lint run below is clean
+          set +e
+          timeout 1800 pnpm openclaw --version > /dev/null 2>&1
+          set -e
+
+          # 2d. real binary CLI lint under PR head: validation preserved, no throw
+          set +e
+          timeout 1800 pnpm openclaw doctor --lint --only core/doctor/workspace-suggestions --json --no-color \
+            > "$RUNNER_TEMP/proof/head-lint.json" 2> "$RUNNER_TEMP/proof/head-lint.err"
+          head_lint_exit=$?
+          set -e
+          node -e '
+            const fs = require("node:fs");
+            const out = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const ids = (out.findings ?? []).map((f) => f.checkId);
+            const fcv = ids.includes("core/doctor/final-config-validation");
+            const ws = ids.filter((i) => i === "core/doctor/workspace-suggestions").length;
+            const status = fcv && ws === 0 ? "pass" : "fail";
+            console.log(`[proof] scene=head-cli label=head status=${status} checksRun=${out.checksRun} final_config_validation=${fcv} ws_findings=${ws} exit=${process.argv[2]}`);
+            if (status !== "pass") process.exit(1);
+          ' "$RUNNER_TEMP/proof/head-lint.json" "$head_lint_exit" 2>&1 | tee -a "$RUNNER_TEMP/proof/markers.txt"
+          if grep -q "No agents configured" "$RUNNER_TEMP/proof/head-lint.err"; then
+            echo "::error::PR head doctor crashed in workspace check"; exit 1;
+          fi
+
+          # 2e. doctor --fix under PR head: latest-stable state DB survives the upgrade
+          set +e
+          timeout 1800 pnpm openclaw doctor --fix --non-interactive --no-color \
+            > "$RUNNER_TEMP/proof/head-fix.log" 2>&1
+          head_fix_exit=$?
+          set -e
+          sqlite_count=$(find "$OPENCLAW_STATE_DIR" -name '*.sqlite' -type f -size +0c | wc -l)
+          if [ "$sqlite_count" -ge 1 ]; then status=pass; else status=fail; fi
+          echo "[proof] scene=head-state label=head status=$status sqlite_files=$sqlite_count fix_exit=$head_fix_exit" | tee -a "$RUNNER_TEMP/proof/markers.txt"
+          if [ "$status" != "pass" ]; then
+            echo "::error::PR head doctor --fix lost the latest-stable state database"; exit 1;
+          fi
+
+      - name: Verify all proof markers
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat "$RUNNER_TEMP/proof/before-scope.log"
+            cat "$RUNNER_TEMP/proof/after-scope.log"
+            cat "$RUNNER_TEMP/proof/stable-scope.log"
+            cat "$RUNNER_TEMP/proof/markers.txt"
+          } > "$RUNNER_TEMP/proof/all-markers.txt"
+          echo "=== PROOF MARKERS ==="
+          cat "$RUNNER_TEMP/proof/all-markers.txt"
+          for marker in \
+            'scene=workspace-scopes label=before status=pass' \
+            'scene=workspace-scopes label=after status=pass' \
+            'scene=stable-scope label=latest-stable status=pass' \
+            'scene=stable-cli label=latest-stable status=pass' \
+            'scene=stable-state label=latest-stable status=pass' \
+            'scene=head-cli label=head status=pass' \
+            'scene=head-state label=head status=pass'; do
+            grep -q "$marker" "$RUNNER_TEMP/proof/all-markers.txt" \
+              || { echo "::error::missing marker: $marker"; exit 1; }
+          done
+          if grep -q 'status=fail' "$RUNNER_TEMP/proof/all-markers.txt"; then
+            echo "::error::one or more proof scenes failed"
+            exit 1
+          fi
+          {
+            echo "Proof summary (PR #171023)"
+            echo "BEFORE_SHA=$BEFORE_SHA"
+            echo "AFTER_SHA=$AFTER_SHA"
+            echo "STABLE_VERSION=$STABLE_VERSION"
+            cat "$RUNNER_TEMP/proof/all-markers.txt"
+          } > "$RUNNER_TEMP/proof/proof.log"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: proof-doctor-empty-roster
+          path: ${{ runner.temp }}/proof/
+          retention-days: 30
